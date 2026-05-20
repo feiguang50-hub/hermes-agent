@@ -3,8 +3,8 @@
 let
   src = ../apps;
   npmDeps = pkgs.fetchNpmDeps {
-    src = ../apps/dashboard;
-    hash = "sha256-jJsVp3Dz+6/GaruxcUSby+G1vVB+nHHlu1tFWE9wQZQ=";
+    inherit src;
+    hash = "sha256-GxSmEpclOwmv94KmGMediPITxqXAsxqTEQOoDIbYkUw=";
   };
 
   npm = hermesNpmLib.mkNpmPassthru { folder = "apps/dashboard"; attr = "web"; pname = "hermes-web"; };
