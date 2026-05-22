@@ -294,27 +294,23 @@ _RESIZE_TARGET_BYTES = 5 * 1024 * 1024
 _MAX_IMAGE_DIMENSION = 7999
 
 
-def _is_anthropic_provider() -> bool:
-    """Return True if the active main provider uses Anthropic's image-block
-    format (so the 8000 px rule applies).
+# Providers that use Anthropic image-block format and enforce the 8000 px cap.
+# Mirrors the Anthropic + aggregators-proxying-Claude subset of
+# ``_supports_media_in_tool_results`` below.
+_ANTHROPIC_IMAGE_PROVIDERS = frozenset({
+    "anthropic", "claude", "claude-code", "anthropic-direct",
+    "openrouter", "nous", "vertex", "bedrock",
+    "anthropic-vertex", "google-vertex",
+})
 
-    Covers native Anthropic plus aggregators that route to Claude. Mirrors
-    the provider sets in ``_supports_media_in_tool_results``.
-    """
+
+def _is_anthropic_provider() -> bool:
+    """True if the active main provider uses Anthropic image-block format."""
     try:
         from agent.auxiliary_client import _read_main_provider
-        p = (_read_main_provider() or "").strip().lower()
+        return (_read_main_provider() or "").strip().lower() in _ANTHROPIC_IMAGE_PROVIDERS
     except Exception:
         return False
-    # Native Anthropic + common aliases
-    if p in {"anthropic", "claude", "claude-code", "anthropic-direct"}:
-        return True
-    # Aggregators that may route to Claude — clamp is harmless for non-Claude
-    # routes since those vendors handle their own limits.
-    if p in {"openrouter", "nous", "vertex", "bedrock",
-             "anthropic-vertex", "google-vertex"}:
-        return True
-    return False
 
 
 def _get_image_dimensions(image_path: Path) -> Optional[tuple]:
