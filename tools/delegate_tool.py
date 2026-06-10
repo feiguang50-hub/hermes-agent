@@ -2114,7 +2114,7 @@ def delegate_task(
             # Smart model routing: pick a tier-appropriate model per task by
             # its goal (no-op unless smart_model_routing.enabled and delegation
             # didn't pin a model). Cache-safe — children start fresh.
-            task_creds = _route_task_creds(creds, t.get("goal", ""), parent_agent)
+            task_creds = _route_task_creds(creds, str(t.get("goal") or ""), parent_agent)
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2579,9 +2579,10 @@ def _route_task_creds(base_creds: dict, goal: str, parent_agent) -> dict:
     Cache-safe by construction: subagents start from a fresh context, so
     picking a per-task model never invalidates any cached prefix. Only acts
     when delegation didn't already pin a model (explicit ``delegation.model``
-    wins) and ``smart_model_routing`` is enabled with ``apply_to_delegation``.
-    Fail-open: returns ``base_creds`` unchanged on any miss or error, so the
-    child inherits the parent model exactly as before.
+    wins), ``smart_model_routing`` is enabled with ``apply_to_delegation``,
+    and the parent is on the Nous Portal (routing is Nous-only). Fail-open:
+    returns ``base_creds`` unchanged on any miss or error, so the child
+    inherits the parent model exactly as before.
     """
     if base_creds.get("model"):
         return base_creds  # explicit delegation model wins over routing

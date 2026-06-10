@@ -1343,13 +1343,13 @@ DEFAULT_CONFIG = {
         },
         # Routing classifier — the cheap "picker" that smart_model_routing
         # consults to label an incoming request's complexity tier (light /
-        # standard / heavy). Point this at a small, fast model: it runs once
+        # standard / heavy). Runs on the Nous Portal (smart routing is
+        # Nous-only). Point this at a small, fast Portal model: it runs once
         # per fresh session and per delegated subtask, so an expensive model
-        # here defeats the purpose. "auto" = use the main chat model (works,
-        # but you should override with e.g. openrouter google/gemini-3-flash-preview).
+        # here defeats the purpose. "auto" = use the main chat model.
         "routing_classifier": {
-            "provider": "auto",
-            "model": "",
+            "provider": "nous",
+            "model": "google/gemini-3.5-flash",
             "base_url": "",
             "api_key": "",
             "timeout": 20,
@@ -1741,21 +1741,26 @@ DEFAULT_CONFIG = {
     # (subagents get fresh context). It never swaps the main model mid-
     # conversation (that is what `/model` is for, and it resets the cache).
     #
+    # Nous Portal only: every tier runs on the Nous Portal, and routing only
+    # engages when the active model is itself on Nous Portal (otherwise it is
+    # a strict no-op — it never moves a non-Nous user onto Nous). The Portal
+    # fronts the frontier models across vendors, so one credential covers
+    # every tier.
+    #
     # Off by default. The classifier runs via auxiliary.routing_classifier —
-    # point that at a cheap, fast model (see its comment above).
+    # point that at a cheap, fast Portal model (see its comment above).
     "smart_model_routing": {
         "enabled": False,            # master switch
         "apply_to_sessions": True,   # route at the start of a fresh session
         "apply_to_delegation": True, # route delegated subtasks by their goal
-        # Where each complexity tier goes. Leave provider+model empty to
-        # "stay on the current/parent model" for that tier — that is the
-        # natural baseline for `standard`. Credentials (base_url, api_key,
-        # api_mode) are resolved automatically from the provider, exactly
-        # like delegation.provider/model.
+        # Which Nous Portal model each complexity tier runs on. Leave a tier
+        # empty to "stay on the current/parent model" — the natural baseline
+        # for `standard`. Credentials resolve automatically from the Nous
+        # provider, exactly like delegation.model.
         "tiers": {
-            "light":    {"provider": "", "model": ""},  # e.g. openrouter / google/gemini-3-flash-preview
-            "standard": {"provider": "", "model": ""},  # empty = main model
-            "heavy":    {"provider": "", "model": ""},  # e.g. anthropic / claude-opus-4.7
+            "light":    "google/gemini-3.5-flash",   # fast + cheap
+            "standard": "",                          # empty = main model
+            "heavy":    "anthropic/claude-opus-4.8", # frontier
         },
         # Tier used when the classifier is unreachable or returns garbage.
         # Fail-open: a broken picker must never wedge a turn.

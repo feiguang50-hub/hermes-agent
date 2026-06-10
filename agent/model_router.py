@@ -5,6 +5,14 @@ A lightweight classifier labels an incoming request's complexity tier
 model. This mirrors the Cursor "Auto" idea — right-size the model to the
 task — while respecting Hermes' sacred per-conversation prompt cache.
 
+**Nous Portal only.** Routing is a Nous Portal feature: every tier resolves
+to a model served by the Nous Portal (``provider: nous``), and the router
+only engages when the active model is itself on Nous Portal. If the current
+model is on any other provider the router is a strict no-op, so it never
+silently switches a non-Nous user onto Nous. The Portal already fronts the
+frontier models across vendors (``anthropic/…``, ``openai/…``,
+``google/…``, ``x-ai/…``), so a single Nous credential covers every tier.
+
 The router is consulted ONLY at points where there is no cached prefix to
 invalidate:
 
@@ -30,6 +38,20 @@ logger = logging.getLogger(__name__)
 # Ordered cheapest/smallest → most capable. Order is load-bearing: the
 # ``min_tier`` floor and tier comparisons rely on it.
 TIERS: Tuple[str, ...] = ("light", "standard", "heavy")
+
+# Smart routing is a Nous Portal feature — every tier resolves through this
+# provider, and routing only engages when the active model is on it too.
+NOUS_PROVIDER = "nous"
+
+
+def _is_nous_provider(provider: str) -> bool:
+    """True when ``provider`` names the Nous Portal.
+
+    The router is Nous-only, so this gates both the active-model check (only
+    route a session/parent already on Nous) and is the implied provider for
+    every tier target.
+    """
+    return (provider or "").strip().lower() == NOUS_PROVIDER
 
 _CLASSIFIER_SYSTEM_PROMPT = (
     "You are a routing classifier for an autonomous AI coding agent. Read the "
@@ -181,25 +203,30 @@ def classify_complexity(
     return tier, "classified"
 
 
-def _tier_target(tier: str, routing_cfg: Dict[str, Any]) -> Tuple[str, str]:
-    """Return the configured ``(provider, model)`` for a tier ('' when unset)."""
+def _tier_model(tier: str, routing_cfg: Dict[str, Any]) -> str:
+    """Return the configured Nous Portal model for a tier ('' when unset).
+
+    A tier maps to a bare Nous model id (``"anthropic/claude-opus-4.8"``).
+    For backward compatibility a ``{"model": "..."}`` dict is also accepted;
+    any ``provider`` key is ignored — tiers always run on the Nous Portal.
+    An empty value means "stay on the current/parent model" for that tier.
+    """
     tiers = routing_cfg.get("tiers")
     if not isinstance(tiers, dict):
-        return "", ""
+        return ""
     entry = tiers.get(tier)
-    if not isinstance(entry, dict):
-        return "", ""
-    provider = str(entry.get("provider") or "").strip()
-    model = str(entry.get("model") or "").strip()
-    return provider, model
+    if isinstance(entry, dict):
+        entry = entry.get("model")
+    return str(entry or "").strip()
 
 
 def _resolve_tier_credentials(provider: str, model: str) -> Optional[Dict[str, Any]]:
-    """Resolve full credentials for a tier's provider:model pair.
+    """Resolve full credentials for a tier's Nous Portal model.
 
-    Reuses the same runtime-provider resolver delegation uses, so a routed
-    tier behaves identically to ``delegation.provider``/``model``. Returns
-    None (fail-open) when the provider can't be resolved.
+    ``provider`` is always :data:`NOUS_PROVIDER` — tiers are Nous-only. Reuses
+    the same runtime-provider resolver delegation uses, so a routed tier
+    behaves identically to ``delegation.provider``/``model``. Returns None
+    (fail-open) when Nous credentials can't be resolved.
     """
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -244,12 +271,22 @@ def route(
     """Decide which model ``message`` should run on.
 
     Returns a :class:`RoutingDecision` when the request should run on a
-    *different* model than the current one, or ``None`` to stay put (routing
-    disabled, tier unconfigured, no-op, or any resolution failure). ``None``
-    is the cache-safe outcome — the caller makes no change.
+    *different* Nous Portal model than the current one, or ``None`` to stay
+    put (routing disabled, not on Nous, tier unconfigured, no-op, or any
+    resolution failure). ``None`` is the cache-safe outcome — the caller
+    makes no change.
     """
     routing_cfg = get_routing_config(config)
     if not routing_cfg.get("enabled"):
+        return None
+
+    # Nous Portal only: never route a session/parent that isn't already on
+    # Nous, so the feature can't silently move a user onto another provider.
+    if not _is_nous_provider(current_provider):
+        logger.debug(
+            "model_router: current provider %r is not Nous Portal — staying",
+            current_provider,
+        )
         return None
 
     if timeout is None:
@@ -265,20 +302,19 @@ def route(
     tier, reason = classify_complexity(message, routing_cfg=routing_cfg, timeout=timeout)
     tier = _apply_min_tier_floor(tier, routing_cfg)
 
-    provider, model = _tier_target(tier, routing_cfg)
-    if not provider or not model:
+    model = _tier_model(tier, routing_cfg)
+    if not model:
         # Tier intentionally maps to "stay on the current/parent model".
         logger.debug("model_router: tier %s has no target — staying", tier)
         return None
 
-    cur_provider = (current_provider or "").strip().lower()
-    cur_model = (current_model or "").strip()
-    if provider.strip().lower() == cur_provider and model == cur_model:
-        # Already on the right model — never break the cache for a no-op.
+    # Current provider is already known to be Nous (gated above), so a model
+    # match alone means we're on the right tier — never break the cache.
+    if model == (current_model or "").strip():
         logger.debug("model_router: tier %s already active (%s) — no-op", tier, model)
         return None
 
-    creds = _resolve_tier_credentials(provider, model)
+    creds = _resolve_tier_credentials(NOUS_PROVIDER, model)
     if creds is None:
         return None
 
