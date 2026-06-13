@@ -14565,6 +14565,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _context_length = getattr(_agent.context_compressor, "context_length", 0) or 0
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
+            # Compression can rotate the agent to a new session before the
+            # follow-up model call succeeds. Sync that rotation before any
+            # early return so the next gateway turn reloads the compressed
+            # child transcript instead of the stale pre-compression parent.
+            agent = agent_holder[0]
+            _session_was_split = False
+            effective_session_id = getattr(agent, 'session_id', session_id) if agent else session_id
+            if agent and session_key and effective_session_id != session_id:
+                _session_was_split = True
+                logger.info(
+                    "Session split detected: %s → %s (compression)",
+                    session_id, effective_session_id,
+                )
+                entry = self.session_store._entries.get(session_key)
+                if entry:
+                    entry.session_id = effective_session_id
+                    self.session_store._save()
+                    self._sync_telegram_topic_binding(
+                        source, entry, reason="agent-result-compression",
+                    )
+
+            # When compression created a new session, the messages list was
+            # shortened. Using the original history offset would make gateway
+            # persistence slice away the compressed handoff/tail on failure.
+            _effective_history_offset = 0 if _session_was_split else len(agent_history)
+
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
                 return {
@@ -14579,7 +14605,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "error": result.get("error"),
                     "compression_exhausted": result.get("compression_exhausted", False),
                     "tools": tools_holder[0] or [],
-                    "history_offset": len(agent_history),
+                    "history_offset": _effective_history_offset,
+                    "session_id": effective_session_id,
                     "last_prompt_tokens": _last_prompt_toks,
                     "input_tokens": _input_toks,
                     "output_tokens": _output_toks,
@@ -14625,23 +14652,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         unique_tags.insert(0, "[[audio_as_voice]]")
                     final_response = final_response + "\n" + "\n".join(unique_tags)
             
-            # Sync session_id: the agent may have created a new session during
-            # mid-run context compression (_compress_context splits sessions).
-            # If so, update the session store entry so the NEXT message loads
-            # the compressed transcript, not the stale pre-compression one.
-            agent = agent_holder[0]
-            _session_was_split = False
-            if agent and session_key and hasattr(agent, 'session_id') and agent.session_id != session_id:
-                _session_was_split = True
-                logger.info(
-                    "Session split detected: %s → %s (compression)",
-                    session_id, agent.session_id,
-                )
-                entry = self.session_store._entries.get(session_key)
-                if entry:
-                    entry.session_id = agent.session_id
-                    self.session_store._save()
-
+            if _session_was_split:
                 # If this is a Telegram DM and source.thread_id was lost during
                 # the session split (synthetic / recovered event), restore it
                 # from the binding so _thread_metadata_for_source produces the
@@ -14672,15 +14683,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             "Failed to restore thread_id from binding after session split",
                             exc_info=True,
                         )
-
-            effective_session_id = getattr(agent, 'session_id', session_id) if agent else session_id
-
-            # When compression created a new session, the messages list was
-            # shortened.  Using the original history offset would produce an
-            # empty new_messages slice, causing the gateway to write only a
-            # user/assistant pair — losing the compressed summary and tail.
-            # Reset to 0 so the gateway writes ALL compressed messages.
-            _effective_history_offset = 0 if _session_was_split else len(agent_history)
 
             # Auto-generate session title after first exchange (non-blocking)
             if final_response and self._session_db:
