@@ -329,7 +329,6 @@ const buildOverlayCtx = (ctx: SlashRunCtx, sys: Sys, s: BillingStateResponse): B
 
 export const topupCommands: SlashCommand[] = [
   {
-    aliases: ['billing'],
     help: 'Show your balance and manage billing — add funds, auto-reload, limits',
     name: 'topup',
     // ZERO sub-commands (plan §0.4): any arg is ignored. Bare `/topup`

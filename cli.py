@@ -9177,13 +9177,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
     # /billing — Phase 2b terminal billing (CLI surface, all 5 screens)
     # ------------------------------------------------------------------
 
-    def _show_billing(self, command: str = "/billing"):
-        """`/billing` — terminal billing for Nous (one interactive modal).
+    def _show_billing(self, command: str = "/topup"):
+        """`/topup` — terminal billing for Nous (one interactive modal).
 
-        ZERO sub-commands: any argument is ignored. Bare ``/billing`` always
+        ZERO sub-commands: any argument is ignored. Bare ``/topup`` always
         opens the Overview (Screen 1), whose numbered menu is the *only* way to
         reach the Buy / Auto-reload / Monthly-limit sub-screens. (Per the unified
-        UX spec §0.4 — ``/billing buy`` etc. are gone; we don't error on a stray
+        UX spec §0.4 — ``/topup buy`` etc. are gone; we don't error on a stray
         arg, we just open the menu.)
 
         Interactive CLI uses the prompt_toolkit modal; non-interactive contexts
@@ -9201,7 +9201,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 _cprint(f"  💳 {_d(_msg)}")
             else:
                 _cprint(f"  💳 {_d('Not logged into Nous Portal.')}")
-                print("  Run `hermes portal` to log in, then /billing.")
+                print("  Run `hermes portal` to log in, then /topup.")
             return
 
         # Any sub-arg is intentionally ignored — always open the menu.
