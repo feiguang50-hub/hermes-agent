@@ -50,6 +50,19 @@ _approval_tool_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "approval_tool_call_id",
     default="",
 )
+_tool_policy_terminal_allow: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "tool_policy_terminal_allow",
+    default=False,
+)
+
+
+def set_tool_policy_terminal_allow() -> contextvars.Token[bool]:
+    """Allow ordinary terminal prompts for the current tool execution only."""
+    return _tool_policy_terminal_allow.set(True)
+
+
+def reset_tool_policy_terminal_allow(token: contextvars.Token[bool]) -> None:
+    _tool_policy_terminal_allow.reset(token)
 
 # Interactive-CLI flag. Concurrent ACP sessions run on a shared
 # ThreadPoolExecutor (acp_adapter/server.py), so mutating the process-global
@@ -1605,8 +1618,9 @@ def approve_permanent(pattern_key: str):
 
 
 def load_permanent(patterns: set):
-    """Bulk-load permanent allowlist entries from config."""
+    """Replace permanent entries with the active profile's allowlist."""
     with _lock:
+        _permanent_approved.clear()
         _permanent_approved.update(patterns)
 
 
@@ -1662,10 +1676,14 @@ def load_permanent_allowlist() -> set:
         from hermes_cli.config import load_config
         config = load_config()
         patterns = set(config.get("command_allowlist", []) or [])
-        if patterns:
-            load_permanent(patterns)
+        # Replace rather than merge: long-lived processes can reload under a
+        # different profile, whose permanent approvals must remain isolated.
+        load_permanent(patterns)
         return patterns
     except Exception as e:
+        # Fail closed across malformed profile transitions: stale grants from
+        # the previously active profile must not remain live in this process.
+        load_permanent(set())
         logger.warning("Failed to load permanent allowlist: %s", e)
         return set()
 
@@ -2031,6 +2049,7 @@ def _run_approval_gate(
     autoapprove_log_prefix: str,
     fail_closed_when_no_human: bool = False,
     no_human_block_message: str = "",
+    enforce_under_yolo: bool = False,
 ) -> dict:
     """Shared human-approval gate for a flagged action (command or tool).
 
@@ -2075,7 +2094,9 @@ def _run_approval_gate(
     # --yolo bypasses all approval prompts (session- or process-scoped).
     # Hardline blocks are handled by the caller BEFORE this gate, so yolo
     # here only skips the recoverable approval layer.
-    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled():
+    if not enforce_under_yolo and (
+        _YOLO_MODE_FROZEN or is_current_session_yolo_enabled()
+    ):
         return {"approved": True, "message": None}
 
     session_key = get_current_session_key()
@@ -2298,6 +2319,12 @@ def check_dangerous_command(command: str, env_type: str,
     if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled():
         return {"approved": True, "message": None}
 
+    # A declarative terminal allow skips only the ordinary dangerous-command
+    # approval layer. Hardline and user-deny checks above still win, and cron
+    # never honors this shortcut because its unattended policy outranks allow.
+    if _tool_policy_terminal_allow.get() and not env_var_enabled("HERMES_CRON_SESSION"):
+        return {"approved": True, "message": None}
+
     if _command_matches_permanent_allowlist(command):
         return {"approved": True, "message": None}
 
@@ -2329,6 +2356,7 @@ def request_tool_approval(
     *,
     rule_key: str = "",
     approval_callback=None,
+    enforce_under_yolo: bool = False,
 ) -> dict:
     """Escalate an arbitrary tool call to the human-approval gate.
 
@@ -2407,6 +2435,7 @@ def request_tool_approval(
             "but no interactive user or gateway is present to approve it. "
             "A plugin flagged this action for human confirmation."
         ),
+        enforce_under_yolo=enforce_under_yolo,
     )
 
 
@@ -2611,6 +2640,12 @@ def check_all_command_guards(command: str, env_type: str,
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
     if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
+        return {"approved": True, "message": None}
+
+    # Per-tool allow is intentionally narrower than yolo/mode=off: it skips
+    # routine terminal prompts only after hardline/user-deny checks, and never
+    # overrides cron's unattended policy.
+    if _tool_policy_terminal_allow.get() and not env_var_enabled("HERMES_CRON_SESSION"):
         return {"approved": True, "message": None}
 
     if _command_matches_permanent_allowlist(command):

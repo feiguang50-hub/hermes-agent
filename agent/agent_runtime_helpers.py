@@ -2304,6 +2304,15 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                     ),
                 )
             return _finish_agent_tool(result, next_args)
+    elif (
+        getattr(agent, "_context_engine_tool_names", None)
+        and function_name in agent._context_engine_tool_names
+    ):
+        def _execute(next_args: dict) -> Any:
+            return _finish_agent_tool(
+                agent.context_compressor.handle_tool_call(function_name, next_args),
+                next_args,
+            )
     elif agent._memory_manager and agent._memory_manager.has_tool(function_name):
         def _execute(next_args: dict) -> Any:
             return _finish_agent_tool(agent._memory_manager.handle_tool_call(function_name, next_args), next_args)
@@ -2333,6 +2342,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         def _execute(next_args: dict) -> Any:
             return _finish_agent_tool(agent._dispatch_delegate_task(next_args), next_args)
     else:
+        from model_tools import registry
+
         def _execute(next_args: dict) -> Any:
             return _ra().handle_function_call(
                 function_name, next_args, effective_task_id,
@@ -2346,9 +2357,15 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 tool_request_middleware_trace=list(_tool_middleware_trace),
+                dispatch_registry=registry,
             )
 
     from hermes_cli.middleware import run_tool_execution_middleware
+    from model_tools import registry
+
+    registry_entry = registry.get_entry(function_name)
+    if registry_entry is None:
+        registry_entry = getattr(agent, "_dynamic_tool_entries", {}).get(function_name)
 
     return run_tool_execution_middleware(
         function_name,
@@ -2360,6 +2377,8 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         tool_call_id=tool_call_id or "",
         turn_id=getattr(agent, "_current_turn_id", "") or "",
         api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+        registry_entry=registry_entry,
+        dispatch_registry=registry if registry_entry is registry.get_entry(function_name) else None,
     )
 
 

@@ -21,6 +21,7 @@ import logging
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
@@ -105,6 +106,14 @@ class ToolEntry:
         # on every get_definitions() call; results are merged shallow on top
         # of the base schema before the {"type": "function", ...} wrap.
         self.dynamic_schema_overrides = dynamic_schema_overrides
+
+
+@dataclass(frozen=True)
+class DynamicToolEntry:
+    """Policy identity for a tool advertised outside the global registry."""
+
+    name: str
+    toolset: str
 
 
 # ---------------------------------------------------------------------------
@@ -614,13 +623,31 @@ class ToolRegistry:
         entry = self.get_entry(name)
         if not entry:
             return json.dumps({"error": f"Unknown tool: {name}"})
-        try:
+
+        def execute(next_args: dict) -> str | dict:
             if entry.is_async:
                 from model_tools import _run_async
-                result = _run_async(entry.handler(args, **kwargs))
+                result = _run_async(entry.handler(next_args, **kwargs))
             else:
-                result = entry.handler(args, **kwargs)
+                result = entry.handler(next_args, **kwargs)
             return self._normalize_handler_result(name, result)
+
+        try:
+            # This is the narrowest shared execution boundary: model calls,
+            # PluginContext, MCP, and direct framework callers converge here.
+            # The actual entry is passed through so custom registries resolve
+            # their own toolset. Only an explicitly marked, immediate wrapper
+            # handoff is deduplicated; recursive dispatch remains a new call.
+            from hermes_cli.middleware import run_tool_execution_middleware
+
+            return run_tool_execution_middleware(
+                name,
+                args,
+                execute,
+                registry_entry=entry,
+                registry_dispatch=self,
+                **kwargs,
+            )
         except Exception as e:
             logger.exception("Tool %s dispatch error: %s", name, e)
             # Route through the sanitizer so framing tokens / CDATA / fences

@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
 from agent.skill_commands import extract_user_instruction_from_skill_message
-from tools.registry import tool_error
+from tools.registry import DynamicToolEntry, tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,10 @@ def inject_memory_provider_tools(agent: Any) -> int:
     if valid_tool_names is None:
         valid_tool_names = set()
         agent.valid_tool_names = valid_tool_names
+    dynamic_entries = getattr(agent, "_dynamic_tool_entries", None)
+    if dynamic_entries is None:
+        dynamic_entries = {}
+        agent._dynamic_tool_entries = dynamic_entries
 
     added = 0
     for raw_schema in get_schemas():
@@ -139,6 +143,7 @@ def inject_memory_provider_tools(agent: Any) -> int:
             continue
         tools.append({"type": "function", "function": schema})
         valid_tool_names.add(tool_name)
+        dynamic_entries[tool_name] = DynamicToolEntry(tool_name, "memory")
         existing_tool_names.add(tool_name)
         added += 1
 

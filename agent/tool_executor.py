@@ -307,6 +307,11 @@ def _run_agent_tool_execution_middleware(
         return execute(observed_args)
 
     from hermes_cli.middleware import run_tool_execution_middleware
+    from model_tools import registry
+
+    registry_entry = registry.get_entry(function_name)
+    if registry_entry is None:
+        registry_entry = getattr(agent, "_dynamic_tool_entries", {}).get(function_name)
 
     result = run_tool_execution_middleware(
         function_name,
@@ -318,6 +323,7 @@ def _run_agent_tool_execution_middleware(
         tool_call_id=tool_call_id or "",
         turn_id=getattr(agent, "_current_turn_id", "") or "",
         api_request_id=getattr(agent, "_current_api_request_id", "") or "",
+        registry_entry=registry_entry,
     )
     return result, observed_args
 

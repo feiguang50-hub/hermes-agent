@@ -5315,7 +5315,10 @@ def refresh_agent_mcp_tools(
     # (``build_api_kwargs``) can't see a partial rebuild or a cross-attribute
     # half-swap. ``staged_engine_names`` are the context-engine routing names
     # this rebuild actually appended (matching agent_init's dedup-aware add).
-    staged_engine_names = _reinject_post_build_tools(agent, new_defs, new_names)
+    staged_dynamic_entries: dict = {}
+    staged_engine_names = _reinject_post_build_tools(
+        agent, new_defs, new_names, dynamic_entries=staged_dynamic_entries
+    )
 
     # Single atomic read-diff-publish so the returned ``added`` is consistent
     # with what was actually published, even under concurrent callers, and a
@@ -5335,12 +5338,14 @@ def refresh_agent_mcp_tools(
             for t in (getattr(agent, "tools", None) or [])
         }
         if new_names == current:
-            # No change → leave the live snapshot untouched (no churn), but
-            # record the generation so an in-flight older caller can't clobber.
+            # No schema change, but refresh dynamic policy identities in case
+            # this agent predates metadata propagation.
+            agent._dynamic_tool_entries = staged_dynamic_entries
             agent._tool_snapshot_generation = max(published_gen, snapshot_generation)
             return set()
         agent.tools = new_defs
         agent.valid_tool_names = new_names
+        agent._dynamic_tool_entries = staged_dynamic_entries
         # Publish context-engine routing names atomically with the snapshot.
         engine_names = getattr(agent, "_context_engine_tool_names", None)
         if isinstance(engine_names, set):
@@ -5350,7 +5355,9 @@ def refresh_agent_mcp_tools(
         return new_names - current
 
 
-def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
+def _reinject_post_build_tools(
+    agent, tools_list: list, name_set: set, *, dynamic_entries: Optional[dict] = None
+) -> set:
     """Append memory-provider and context-engine tools onto staged locals.
 
     Mirrors the post-``get_tool_definitions`` injection in ``agent_init`` so a
@@ -5365,12 +5372,16 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
     caller publishes this into ``agent._context_engine_tool_names`` atomically
     with the snapshot.
     """
-    def _add(schema: dict) -> bool:
+    def _add(schema: dict, toolset: str) -> bool:
         name = schema.get("name", "")
         if not name or name in name_set:
             return False
         tools_list.append({"type": "function", "function": schema})
         name_set.add(name)
+        if dynamic_entries is not None:
+            from tools.registry import DynamicToolEntry
+
+            dynamic_entries[name] = DynamicToolEntry(name, toolset)
         return True
 
     # Memory-provider tools (mem0/honcho/byterover/supermemory/…).
@@ -5383,7 +5394,7 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
             if "memory" in name_set or memory_provider_tools_enabled(getattr(agent, "enabled_toolsets", None)):
                 for schema in get_mem_schemas():
                     if isinstance(schema, dict):
-                        _add(schema)
+                        _add(schema, "memory")
     except Exception:
         logger.debug("Memory-provider tool re-injection skipped", exc_info=True)
 
@@ -5407,7 +5418,7 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
                 # Only claim the routing name when WE appended the schema, so a
                 # name already owned by a registry/plugin tool keeps its own
                 # dispatch (matches agent_init.py's `continue`-before-claim).
-                if _add(schema) and name:
+                if _add(schema, "context_engine") and name:
                     staged_engine_names.add(name)
     except Exception:
         logger.debug("Context-engine tool re-injection skipped", exc_info=True)

@@ -33,6 +33,10 @@ approvals:
   mode: smart                     # smart | manual | off
   timeout: 60                     # seconds to wait for user response (default: 60)
   cron_mode: deny                 # deny | approve — what cron jobs do when they hit a dangerous command
+  tool_policies:                  # optional per-tool / per-toolset glob rules
+    "*": ask                     # supervise every tool by default
+    read_file: allow              # still asks because the broader rule also matches
+    terminal: deny                # block this tool without prompting
   mcp_reload_confirm: true        # /reload-mcp asks before invalidating the MCP tool cache
   destructive_slash_confirm: true # /clear, /new, /reset, /undo prompt before discarding state
 ```
@@ -44,6 +48,7 @@ The full set of keys:
 | `mode` | `smart` | Approval policy for dangerous shell commands — see the table below. |
 | `timeout` | `60` | Seconds Hermes waits for an approval reply before timing out. |
 | `cron_mode` | `deny` | How [cron jobs](./features/cron.md) behave headlessly when they trigger a dangerous-command prompt. `deny` blocks the command (the agent must find another path); `approve` auto-approves everything in cron context. |
+| `tool_policies` | `{}` | Profile-local, case-insensitive glob mapping for tools and registered toolsets. Values are `allow`, `ask`, or `deny`. |
 | `mcp_reload_confirm` | `true` | When true, `/reload-mcp` asks before rebuilding the MCP tool set. Rebuilding invalidates the provider prompt cache (tool schemas live in the system prompt), so the next message re-sends full input tokens. Users who click **Always Approve** flip this key to `false`. |
 | `destructive_slash_confirm` | `true` | When true, destructive session slash commands (`/clear`, `/new`, `/reset`, `/undo`) prompt before discarding conversation state. Three-option dialog (Approve Once / Always Approve / Cancel) routed through native yes/no buttons on Telegram, Discord, and Slack; text fallback elsewhere. Users who click **Always Approve** flip this key to `false`. TUI uses its own modal overlay (set `HERMES_TUI_NO_CONFIRM=1` to opt out there). |
 
@@ -52,6 +57,28 @@ The full set of keys:
 | **smart** (default) | Use an auxiliary LLM to assess risk. Low-risk commands (e.g., `python -c "print('hello')"`) are auto-approved for that command only. Genuinely dangerous commands are auto-denied. Uncertain cases escalate to a manual prompt. |
 | **manual** | Always prompt the user for approval on dangerous commands. |
 | **off** | Disable all approval checks — equivalent to running with `--yolo`. All commands execute without prompts. |
+
+### Per-tool policies
+
+`approvals.tool_policies` applies at the shared execution boundary used by the
+CLI, gateway platforms, MCP tools, plugins, and both sequential and concurrent
+agent dispatch. It does not alter the advertised tool schemas or system prompt,
+so changing policy does not invalidate the conversation prompt cache.
+
+- `deny` returns a blocked tool result without executing the tool.
+- `ask` uses the normal CLI or gateway approval UI and fails closed when no
+  human approval surface is available. Explicit `ask` rules remain active in
+  YOLO / `approvals.mode: off`; cron still follows `approvals.cron_mode`.
+- `allow` skips this policy prompt. For `terminal`, it also skips the ordinary
+  dangerous-command prompt, but never bypasses hardline blocks, user-defined
+  `approvals.deny` rules, cron policy, plugin escalation, tool scope, or
+  sensitive-path protections.
+
+Patterns are case-insensitive Python `fnmatch` globs matched against both the
+tool name and its registered toolset. Across every overlapping match, the most
+restrictive result always wins (`deny` > `ask` > `allow`), regardless of pattern
+specificity or whether the match came from the tool name or toolset. Always
+quote wildcard keys in YAML.
 
 :::warning
 Setting `approvals.mode: off` disables all safety prompts. Use only in trusted environments (CI/CD, containers, etc.).

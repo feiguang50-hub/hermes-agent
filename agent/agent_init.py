@@ -1906,6 +1906,8 @@ def init_agent(
     # would still leak lcm_* tools into the tool surface and incur the
     # same local-model latency penalty.
     agent._context_engine_tool_names: set = set()
+    if not hasattr(agent, "_dynamic_tool_entries"):
+        agent._dynamic_tool_entries = {}
     if (
         hasattr(agent, "context_compressor")
         and agent.context_compressor
@@ -1940,6 +1942,10 @@ def init_agent(
             agent.tools.append(_wrapped)
             agent.valid_tool_names.add(_tname)
             agent._context_engine_tool_names.add(_tname)
+            from tools.registry import DynamicToolEntry as _DynamicToolEntry
+            agent._dynamic_tool_entries[_tname] = _DynamicToolEntry(
+                _tname, "context_engine"
+            )
             _existing_tool_names.add(_tname)
 
     # Notify context engine of session start
