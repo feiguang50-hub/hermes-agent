@@ -162,6 +162,43 @@ target — check by resolving the PATH symlink).
 
 **Step 4:** Commit: `feat(dev): worktree-based updates for modified checkouts`.
 
+## Task 3.4b: The cwd guard (`--dev` / `--global`, §2.5.1a)
+
+**Files:**
+- Modify: `apps/hermes-launcher/src/main.rs` (guard before exec),
+  `bin/hermes` stub (same check in ~5 lines of sh)
+- Test: launcher unit tests + a case in the phase E2E
+
+**Step 1 (failing tests, pure logic):** `cwd_guard(launcher_tree, cwd,
+argv) -> Run | ReExec(path) | Refuse(msg)`:
+- no enclosing hermes-agent checkout above cwd → `Run`;
+- enclosing checkout == launcher's own tree → `Run` (`./bin/hermes`
+  inside its worktree never needs a flag);
+- mismatch + `--dev` → `ReExec(<cwd checkout>/bin/hermes)` (strip the
+  flag from argv);
+- mismatch + `--global` → `Run` (strip the flag);
+- mismatch + neither → `Refuse` with the §2.5.1a message (exit 2).
+
+Enclosing-checkout detection: walk up from cwd to the first dir with
+`pyproject.toml` containing `name = "hermes-agent"` (string probe is
+fine — no toml parser in the launcher); stop at filesystem root. A
+worktree's `.git` FILE bounds the tree like a `.git` dir. Detection of
+"which tree does this launcher belong to" is task 1.1's
+`resolve_tree_root` — reuse it.
+
+**Step 2:** wire into the launcher main before venv resolution (the
+refusal must fire in milliseconds, before any Python starts) and mirror
+the same check in the `bin/hermes` stub for bare clones that haven't run
+`dev sync` yet.
+
+**Step 3:** green. Guard cases in the E2E (task 3.7): from inside
+checkout B with the symlink at checkout A → refuse; `--dev` runs B;
+`--global` runs A; from B via B's own `./bin/hermes` → runs without
+flags; from `$HOME` → managed runs without flags.
+
+**Step 4:** Commit: `feat(dev): cwd guard — refuse ambiguous
+checkout/install mismatch`.
+
 ## Task 3.5: `hermes eject`
 
 **Files:**
@@ -213,7 +250,11 @@ text appears, tests still run.
    dirty change still present.
 4. If a slot exists from phase 1's fixture: symlink to slot launcher →
    managed version runs. All three targets coexist.
-5. hermes dev gc --keep 1 → old version-worktree removed; active one
+5. cwd-guard cases (task 3.4b): from inside worktree B with the symlink
+   at tree A → plain `hermes` refuses (exit 2); `hermes --dev` runs B;
+   `hermes --global` runs A; B's own `./bin/hermes` from inside B runs
+   with no flag; `hermes` from $HOME runs with no flag.
+6. hermes dev gc --keep 1 → old version-worktree removed; active one
    survives.
 ```
 

@@ -646,6 +646,45 @@ Consequences:
   are fine here — unlike the update flip, which is why the flip commits
   through `current.txt` rather than any link, §2.2.)
 
+### 2.5.1a The cwd guard: standing in a checkout ≠ running that checkout
+
+Activation-by-symlink leaves one honest ambiguity: your PATH `hermes`
+resolves to one tree (a managed slot, or checkout A) while your cwd is
+inside another (checkout B you're hacking on). You type `hermes` and get
+code from somewhere else — worst on `hermes update`, where "update the
+thing I'm standing in" and "update the install I'm running" silently
+diverge.
+
+Rule: **a mismatch refuses; a match runs.**
+
+- The launcher compares its own tree root (§2.5.1 resolution) against the
+  nearest enclosing hermes-agent checkout above cwd (walk up for a
+  `pyproject.toml` with `name = "hermes-agent"`; a worktree's `.git`
+  *file* marks the tree boundary the same as a `.git` dir).
+- No enclosing checkout, or it's the same tree the launcher belongs to →
+  run normally. Running `./bin/hermes` inside its own worktree never
+  needs a flag.
+- Mismatch → refuse fast (before any imports) with the two ways out:
+
+```
+hermes: you are inside a hermes-agent checkout (~/src/hermes-agent/.worktrees/foo)
+but this `hermes` runs from the managed install.
+  hermes --dev       run THIS checkout's ./bin/hermes instead
+  hermes --global    run the managed install from here anyway
+```
+
+- `--dev` re-execs the cwd checkout's `bin/hermes` (which self-checks its
+  venv per §2.5.1 and says "run `hermes dev sync`" if unprovisioned).
+  `--global` proceeds with the invoked launcher. Non-interactive callers
+  (gateway supervisor, cron, desktop backend spawn) run with cwd outside
+  any checkout, so services never trip the guard; scripts that do run
+  inside checkouts state their intent with a flag and become
+  self-documenting.
+
+The guard makes the symlink model safe for people with several worktrees:
+which tree executes is always either unambiguous or explicitly chosen,
+never inferred wrong.
+
 ### 2.5.2 Ejected updates: worktree instead of stash
 
 Today, `hermes update` on a tree with local changes runs the scariest code
