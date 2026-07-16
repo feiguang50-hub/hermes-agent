@@ -14971,9 +14971,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             exit_code_path.write_text("124")
             await _flush_buffer()
             try:
+                label = "adoption" if _prefix == ".adopt" else "update"
                 await adapter.send(
                     chat_id,
-                    "❌ Hermes update timed out after 30 minutes.",
+                    f"❌ Hermes {label} timed out after 30 minutes.",
                     metadata=_non_conversational_metadata(metadata, platform=platform),
                 )
             except Exception:
@@ -15079,19 +15080,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 # Strip ANSI escape codes for clean display
                 output = re.sub(r'\x1b\[[0-9;]*m', '', output).strip()
+                _is_adopt = _prefix == ".adopt"
                 if output:
                     if len(output) > 3500:
                         output = "…" + output[-3500:]
                     if exit_code == 0:
-                        adopt_hint = _adopt_hint_for_update()
-                        msg = f"✅ Hermes update finished.{adopt_hint}\n\n```\n{output}\n```"
+                        if _is_adopt:
+                            msg = f"✅ Hermes adoption finished.\n\n```\n{output}\n```"
+                        else:
+                            adopt_hint = _adopt_hint_for_update()
+                            msg = f"✅ Hermes update finished.{adopt_hint}\n\n```\n{output}\n```"
                     else:
-                        msg = f"❌ Hermes update failed.\n\n```\n{output}\n```"
+                        _label = "adoption" if _is_adopt else "update"
+                        msg = f"❌ Hermes {_label} failed.\n\n```\n{output}\n```"
                 elif exit_code == 0:
-                    adopt_hint = _adopt_hint_for_update()
-                    msg = "✅ Hermes update finished successfully." + adopt_hint
+                    if _is_adopt:
+                        msg = "✅ Hermes adoption finished successfully."
+                    else:
+                        adopt_hint = _adopt_hint_for_update()
+                        msg = "✅ Hermes update finished successfully." + adopt_hint
                 else:
-                    msg = "❌ Hermes update failed. Check the gateway logs or run `hermes update` manually for details."
+                    if _is_adopt:
+                        msg = "❌ Hermes adoption failed. Check the gateway logs or run `hermes adopt` manually for details."
+                    else:
+                        msg = "❌ Hermes update failed. Check the gateway logs or run `hermes update` manually for details."
                 await adapter.send(
                     chat_id,
                     msg,
