@@ -100,9 +100,13 @@ mkdir -p "$PYTHON_INSTALL_DIR"
 #   <install-dir>/cpython-3.11.15-linux-x86_64-gnu/bin/python
 "$UV" python install "$PYTHON_VERSION" --install-dir "$PYTHON_INSTALL_DIR"
 # Find the python binary in the nested structure
-BUNDLE_PYTHON=$(find "$PYTHON_INSTALL_DIR" \( -name "python3.11" -o -name "python3.11.exe" \) -type f 2>/dev/null | head -1)
+BUNDLE_PYTHON=$(find "$PYTHON_INSTALL_DIR" \
+    \( -name "python3.11" -o -name "python3.11.exe" \) \
+    -type f ! -path '*/Lib/venv/*' 2>/dev/null | head -1)
 if [ -z "$BUNDLE_PYTHON" ]; then
-    BUNDLE_PYTHON=$(find "$PYTHON_INSTALL_DIR" \( -name "python" -o -name "python.exe" \) -type f 2>/dev/null | head -1)
+    BUNDLE_PYTHON=$(find "$PYTHON_INSTALL_DIR" \
+        \( -name "python" -o -name "python.exe" \) \
+        -type f ! -path '*/Lib/venv/*' 2>/dev/null | head -1)
 fi
 if [ -z "$BUNDLE_PYTHON" ] || [ ! -x "$BUNDLE_PYTHON" ]; then
     echo "ERROR: bundle python not found in $PYTHON_INSTALL_DIR" >&2

@@ -141,13 +141,12 @@ jobs:
       - name: Create bundle archive
         shell: bash
         run: |
-          cd dist
           if [[ "${{ matrix.os }}" == "win" ]]; then
-            7z a -tzip "hermes-${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip" bundle/
+            7z a -tzip "dist/hermes-${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip" dist/bundle/
             echo "artifact=dist/hermes-${{ steps.version.outputs.version }}-${{ matrix.platform }}.zip" >> $GITHUB_OUTPUT
           else
-            tar --zstd -cf "hermes-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.zst" -C dist bundle/
-            echo "artifact=hermes-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.zst" >> $GITHUB_OUTPUT
+            tar --zstd -cf "dist/hermes-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.zst" -C dist bundle/
+            echo "artifact=dist/hermes-${{ steps.version.outputs.version }}-${{ matrix.platform }}.tar.zst" >> $GITHUB_OUTPUT
           fi
 
       - name: Upload artifact
