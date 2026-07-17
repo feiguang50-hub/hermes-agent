@@ -7695,7 +7695,11 @@ class SessionDB:
         try:
             self._conn.execute(f"SELECT 1 FROM {name} LIMIT 0")
             return True
-        except sqlite3.OperationalError:
+        except sqlite3.DatabaseError:
+            # OperationalError ("no such table") or the broader
+            # DatabaseError class ("vtable constructor failed", raised when
+            # e.g. a required tokenizer is missing or the table is mid-
+            # teardown) — in every case the table is not queryable.
             return False
 
     def optimize_fts(self) -> int:
