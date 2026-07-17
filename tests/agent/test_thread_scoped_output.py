@@ -61,8 +61,8 @@ def test_concurrent_thread_keeps_output_during_silence_window():
         t1.start()
         t2.start()
         t1.join(timeout=15.0)
-            t2.join(timeout=15.0)
-            assert not t1.is_alive() and not t2.is_alive(), "worker threads didn't finish"
+        t2.join(timeout=15.0)
+        assert not t1.is_alive() and not t2.is_alive(), "worker threads didn't finish"
 
     captured = _run_with_real_stream(body)
     assert "SILENCED" not in captured
