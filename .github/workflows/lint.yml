@@ -184,7 +184,21 @@ jobs:
         run: |
           set -euo pipefail
           PR="${{ github.event.pull_request.number }}"
-          LABELS=$(gh pr view "$PR" --json labels --jq '.labels[].name' || true)
+          # Retry the label fetch: a transient API blip must not read as
+          # "label absent" (which hard-fails the job below on a PR that
+          # actually carries the label).
+          LABELS=""
+          for i in 1 2 3; do
+            if LABELS=$(gh pr view "$PR" --json labels --jq '.labels[].name'); then
+              break
+            fi
+            if [ "$i" = 3 ]; then
+              echo "::error::Could not fetch PR labels after 3 attempts (GitHub API failure — re-run this job)."
+              exit 1
+            fi
+            echo "::warning::gh pr view failed (attempt $i); retrying in 10s"
+            sleep 10
+          done
           if echo "$LABELS" | grep -Fxq 'ci-reviewed'; then
             echo "reviewed=true" >> "$GITHUB_OUTPUT"
             echo "ci-reviewed label present."

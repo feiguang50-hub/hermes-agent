@@ -32,6 +32,12 @@ jobs:
         with:
           path: test_durations.json
           key: test-durations
+          # Saves use test-durations-${run_id}, so the exact key above never
+          # matches — without this prefix fallback the cache ALWAYS missed,
+          # LPT slicing ran on no data, and unbalanced slices pushed heavy
+          # files toward the per-file timeout under load.
+          restore-keys: |
+            test-durations-
 
       - name: Generate test slices
         id: matrix
@@ -115,6 +121,9 @@ jobs:
           NOUS_API_KEY: ""
 
       - name: Upload per-slice durations
+        # Advisory artifact (feeds slice balancing) — a transient artifact-
+        # service blip must not fail an otherwise-green test slice.
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: test-durations-slice-${{ matrix.slice.index }}
