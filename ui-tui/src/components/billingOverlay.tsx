@@ -90,7 +90,7 @@ function OverviewScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
   const full = s.is_admin && s.cli_billing_enabled
 
   const note = !s.is_admin
-    ? 'Billing actions need an org admin/owner.'
+    ? 'Billing actions need someone with billing permissions (owner, admin, or finance admin).'
     : !s.cli_billing_enabled
       ? 'Terminal billing is off for this org — manage it on the portal.'
       : null
@@ -182,9 +182,6 @@ function OverviewScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
         <Text color={t.color.muted}>
           {s.card ? `Card: ${s.card.display ?? s.card.masked}` : 'No saved card on file — “Add funds” walks you through adding one.'}
         </Text>
-      )}
-      {full && s.card?.needs_repair && (
-        <Text color={t.color.warn}>⚠ This card has been failing automatic top-ups — update it on the portal.</Text>
       )}
       {note && (
         <Box marginTop={1}>
@@ -398,9 +395,6 @@ function BuyScreen({ ctx, onPatch, s, t }: ScreenProps) {
         Add funds
       </Text>
       <Text color={t.color.muted}>{payLine}</Text>
-      {s.card?.needs_repair && (
-        <Text color={t.color.warn}>⚠ This card has been failing automatic top-ups — it may decline. Update it on the portal.</Text>
-      )}
       <Text />
       {rows.map((label, i) => (
         <MenuRow active={cSel === i} index={i + 1} key={label} label={label} t={t} />
@@ -505,9 +499,6 @@ function ConfirmScreen({
       {/* Provenance-less payloads (older NAS) keep the generic line; when the
           resolver says WHY this card, payLine already carries it. */}
       {s.card && !s.card.resolved_via && <Text color={t.color.muted}>Your card saved on the portal will be charged.</Text>}
-      {s.card?.needs_repair && (
-        <Text color={t.color.warn}>⚠ This card has been failing automatic top-ups — it may decline. Update it on the portal.</Text>
-      )}
       <Text color={t.color.muted}>By confirming, you allow Nous Research to charge your card.</Text>
       <Text />
       <ActionRow active={sel === 0} color={t.color.ok} label={`Pay $${amount} now`} t={t} />
@@ -554,7 +545,7 @@ function StepUpScreen({
     void ctx.requestRemoteSpending().then(granted => {
       if (!granted) {
         ctx.sys(
-          "! Couldn't enable terminal billing — an org admin or owner has to approve it. Your card was not charged."
+          "! Couldn't enable terminal billing — someone with billing permissions (owner, admin, or finance admin) has to approve it. Your card was not charged."
         )
         onClose()
 
@@ -708,6 +699,11 @@ function StepUpScreen({
 function AutoReloadScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
   const ar = s.auto_reload
   const enabled = Boolean(ar?.enabled)
+  const distinctCard = ar?.card.kind === 'distinct' ? ar.card : null
+  const distinctCardName = distinctCard
+    ? [distinctCard.brand, distinctCard.last4 ? `••${distinctCard.last4}` : null].filter(Boolean).join(' ') || 'a different card'
+    : null
+  const manageCardLabel = 'Use your card on file — manage on portal'
 
   // Prefill from state (strip the $ from the *_usd raw fields if present).
   const prefill = (raw?: null | string) => (raw == null ? '' : String(raw).replace(/^\$/, '').trim())
@@ -716,7 +712,15 @@ function AutoReloadScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
   const [field, setField] = useState<'reloadTo' | 'threshold'>('threshold')
   const [error, setError] = useState<null | string>(null)
   // focusRow: 0=threshold field, 1=reloadTo field, 2=Agree, 3=Turn off (if enabled), last=Cancel
-  const actionRows = enabled ? ['Agree and turn on', 'Turn off', 'Cancel'] : ['Agree and turn on', 'Cancel']
+  const manageCardRows = distinctCard && s.portal_url ? [manageCardLabel] : []
+  const actionRows = enabled
+    ? ['Agree and turn on', 'Turn off', ...manageCardRows, 'Cancel']
+    : ['Agree and turn on', ...manageCardRows, 'Cancel']
+  const actionColors: Record<string, string> = {
+    'Agree and turn on': t.color.ok,
+    'Turn off': t.color.warn,
+    [manageCardLabel]: t.color.accent
+  }
   const FIELD_ROWS = 2
   const [row, setRow] = useState(0)
 
@@ -796,6 +800,12 @@ function AutoReloadScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
       turnOn()
     } else if (label === 'Turn off') {
       turnOff()
+    } else if (label === manageCardLabel) {
+      if (s.portal_url) {
+        ctx.openPortal(s.portal_url)
+      }
+
+      onClose()
     } else {
       onPatch({ screen: 'overview' })
     }
@@ -842,6 +852,7 @@ function AutoReloadScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
   })
 
   const cardLine = s.card ? `Card on file: ${s.card.masked}` : 'No saved card on file'
+  const chargeCardName = distinctCardName ?? (s.card ? s.card.masked : 'your card')
 
   const fieldBox = (label: string, value: string, onChange: (v: string) => void, focused: boolean, key: string) => (
     <Box flexDirection="column" key={key}>
@@ -875,20 +886,23 @@ function AutoReloadScreen({ ctx, onClose, onPatch, s, t }: ScreenProps) {
       </Text>
       <Text color={t.color.muted}>Automatically add funds when your balance is low.</Text>
       <Text color={t.color.muted}>{cardLine}</Text>
+      {distinctCardName && (
+        <Text color={t.color.warn}>⚠ Auto-refill is charging {distinctCardName} — not your card on file.</Text>
+      )}
       <Text />
       {fieldBox('When balance falls below:', threshold, setThreshold, row === 0, 'threshold')}
       {fieldBox('Reload balance to:', reloadTo, setReloadTo, row === 1, 'reloadTo')}
       <Text />
       <Text color={t.color.muted}>
-        By confirming, you authorize Nous Research to charge {s.card ? s.card.masked : 'your card'} whenever your
-        balance falls below the threshold. Turn off any time here or on the portal.
+        By confirming, you authorize Nous Research to charge {chargeCardName} whenever your balance falls below the
+        threshold. Turn off any time here or on the portal.
       </Text>
       {error && <Text color={t.color.error}>{error}</Text>}
       <Text />
       {actionRows.map((label, i) => (
         <ActionRow
           active={!editingField && row - FIELD_ROWS === i}
-          color={label === 'Turn off' ? t.color.warn : label === 'Agree and turn on' ? t.color.ok : t.color.text}
+          color={actionColors[label] ?? t.color.text}
           key={label}
           label={label}
           t={t}

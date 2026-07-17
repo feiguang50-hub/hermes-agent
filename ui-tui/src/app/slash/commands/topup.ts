@@ -13,6 +13,7 @@ import type { SlashCommand, SlashRunCtx } from '../types.js'
 // Poll cadence (plan §5, frozen): 2s interval, 5-minute cap.
 const POLL_INTERVAL_MS = 2000
 const POLL_CAP_MS = 5 * 60 * 1000
+const UNCONFIRMED_CHARGE_MESSAGE = '🟡 Your last charge’s outcome is unconfirmed — check your balance/history before retrying.'
 
 type Sys = (text: string) => void
 
@@ -73,7 +74,27 @@ const renderBillingError = (
       break
 
     case 'role_required':
-      sys('Adding funds needs an org admin/owner. Ask an admin, or manage on the portal.')
+      sys('Adding funds needs someone with billing permissions (owner, admin, or finance admin), or manage this on the portal.')
+
+      break
+
+    case 'consent_required':
+      sys('This action needs a one-time card confirmation and consent step on the portal before it can proceed.')
+
+      break
+
+    case 'org_access_denied':
+      sys("This token isn't bound to an org you can manage. Sign in with the right org, or manage this on the portal.")
+
+      break
+
+    case 'upgrade_cap_exceeded':
+      sys('🔴 Daily plan-change limit reached (5 per org) — try again tomorrow, or manage this on the portal.')
+
+      break
+
+    case 'auto_top_up_disabled_failures':
+      sys('Auto-reload was turned off after repeated charge failures. Fix the card issue, then re-enable it from /topup → Auto-reload.')
 
       break
 
@@ -107,6 +128,13 @@ const renderBillingError = (
       // revoke. Back off and tell the user to retry.
       const mins = env.retry_after ? ` (try again in ~${Math.max(1, Math.round(env.retry_after / 60))} min)` : ''
       sys(`🟡 Too many charges right now${mins}. This isn't a payment failure.`)
+
+      break
+    }
+
+    case 'stripe_unavailable': {
+      const mins = env.retry_after ? ` (try again in ~${Math.max(1, Math.round(env.retry_after / 60))} min)` : ''
+      sys(`🟡 Stripe is having trouble right now — try again shortly${mins}.`)
 
       break
     }
@@ -171,7 +199,7 @@ const pollCharge = (sys: Sys, ctx: SlashRunCtx, chargeId: string, portalUrl?: st
         ctx.guarded<BillingChargeStatusResponse>(r => {
           if (!r.ok) {
             // 429/503 while polling = retry-after, NOT a failure. Back off + continue.
-            if (r.error === 'rate_limited' || r.error === 'temporarily_unavailable') {
+            if (r.error === 'rate_limited' || r.error === 'temporarily_unavailable' || r.error === 'stripe_unavailable') {
               if (timedOut()) {
                 return
               }
@@ -187,7 +215,7 @@ const pollCharge = (sys: Sys, ctx: SlashRunCtx, chargeId: string, portalUrl?: st
             // call it failed; surface the revoke + tell the user to verify balance.
             if (r.error === 'remote_spending_revoked' || r.error === 'session_revoked') {
               renderBillingError(sys, ctx, r)
-              sys('🟡 Your last charge’s outcome is unconfirmed — check your balance/history before retrying.')
+              sys(UNCONFIRMED_CHARGE_MESSAGE)
 
               return
             }
@@ -217,7 +245,13 @@ const pollCharge = (sys: Sys, ctx: SlashRunCtx, chargeId: string, portalUrl?: st
           setTimeout(tick, POLL_INTERVAL_MS)
         })
       )
-      .catch(ctx.guardedErr)
+      .catch(e => {
+        ctx.guardedErr(e)
+
+        if (!ctx.stale()) {
+          sys(UNCONFIRMED_CHARGE_MESSAGE)
+        }
+      })
   }
 
   tick()
@@ -237,6 +271,11 @@ const renderChargeFailed = (sys: Sys, reason?: string | null, portalUrl?: string
 
     case 'card_declined':
       sys('🔴 Your card was declined. Try another card on the portal.')
+
+      break
+
+    case 'processing_error':
+      sys("🔴 The charge didn't go through (processing_error).")
 
       break
 

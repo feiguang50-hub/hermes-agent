@@ -4,6 +4,10 @@ import { renderSync } from '@hermes/ink'
 import React from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
+const inputHarness = vi.hoisted(() => ({
+  handler: undefined as undefined | ((input: string, key: Record<string, boolean>) => void)
+}))
+
 // Stub useInput so the overlay doesn't try to enter raw mode under renderSync
 // (PassThrough stdin doesn't support it). Box/Text pass through to real Ink.
 vi.mock('@hermes/ink', async importOriginal => {
@@ -11,7 +15,9 @@ vi.mock('@hermes/ink', async importOriginal => {
 
   return {
     ...mod,
-    useInput: () => {}
+    useInput: (handler: (input: string, key: Record<string, boolean>) => void) => {
+      inputHarness.handler = handler
+    }
   }
 })
 
@@ -23,8 +29,8 @@ import { DEFAULT_THEME } from '../theme.js'
 
 const t = DEFAULT_THEME
 
-/** Render a SubscriptionOverlay to a string via renderSync + PassThrough. */
-function render(overlay: SubscriptionOverlayState): string {
+/** Mount a SubscriptionOverlay via renderSync + PassThrough. */
+function mount(overlay: SubscriptionOverlayState, onPatch: (next: Partial<SubscriptionOverlayState>) => void = () => {}) {
   const stdout = new PassThrough()
   const stdin = new PassThrough()
   const stderr = new PassThrough()
@@ -38,8 +44,10 @@ function render(overlay: SubscriptionOverlayState): string {
     output += chunk.toString()
   })
 
+  inputHarness.handler = undefined
+  const element = React.createElement(SubscriptionOverlay, { onClose: () => {}, onPatch, overlay, t })
   const instance = renderSync(
-    React.createElement(SubscriptionOverlay, { onClose: () => {}, onPatch: () => {}, overlay, t }),
+    element,
     {
       patchConsole: false,
       stderr: stderr as NodeJS.WriteStream,
@@ -48,10 +56,23 @@ function render(overlay: SubscriptionOverlayState): string {
     }
   )
 
-  instance.unmount()
-  instance.cleanup()
+  return {
+    cleanup: () => {
+      instance.unmount()
+      instance.cleanup()
+    },
+    output: () => stripAnsi(output),
+    rerender: () => instance.rerender(element)
+  }
+}
 
-  return stripAnsi(output)
+/** Render a SubscriptionOverlay to a string via renderSync + PassThrough. */
+function render(overlay: SubscriptionOverlayState): string {
+  const mounted = mount(overlay)
+  const output = mounted.output()
+  mounted.cleanup()
+
+  return output
 }
 
 const TIERS = [
@@ -338,5 +359,123 @@ describe('SubscriptionOverlay — result', () => {
     expect(out).toContain('Could not complete')
     expect(out).toContain('3DS')
     expect(out).toContain('Open the portal to finish')
+  })
+})
+
+describe('SubscriptionOverlay — upgrade response mapping', () => {
+  const applyUpgrade = async (response: unknown) => {
+    const onPatch = vi.fn()
+    const upgrade = vi.fn(() => Promise.resolve(response))
+    const mounted = mount(
+      at('confirm', subscriber(), {
+        ctx: { ...ctx, upgrade } as SubscriptionOverlayState['ctx'],
+        pending: {
+          idempotencyKey: 'upgrade-key',
+          kind: 'upgrade',
+          preview: { ok: true, effect: 'charge_now', target_tier_name: 'Ultra', amount_due_now_cents: 1234 },
+          targetTierId: 'ultra'
+        }
+      }),
+      onPatch
+    )
+
+    inputHarness.handler?.('', { return: true })
+    await vi.waitFor(() => expect(onPatch).toHaveBeenCalled())
+    mounted.cleanup()
+
+    return onPatch.mock.calls.at(-1)?.[0] as Partial<SubscriptionOverlayState>
+  }
+
+  it.each([
+    ['authentication_required', 'upgraded'],
+    ['subscription_payment_intent_requires_action', 'payment_failed']
+  ])('reason %s routes to card verification regardless of status %s', async (reason, status) => {
+    const patch = await applyUpgrade({
+      ok: status === 'upgraded',
+      reason,
+      recovery_url: 'https://portal.example/verify',
+      status,
+      target_tier_name: 'Ultra'
+    })
+
+    expect(patch.screen).toBe('result')
+    expect(patch.result?.ok).toBe(false)
+    expect(patch.result?.message).toContain('verify your card in the portal')
+    expect(patch.result?.recoveryUrl).toBe('https://portal.example/verify')
+  })
+
+  it('card_declined reason routes to a different-card recovery', async () => {
+    const patch = await applyUpgrade({
+      ok: false,
+      reason: 'card_declined',
+      recovery_url: 'https://portal.example/card',
+      status: 'requires_action'
+    })
+
+    expect(patch.result?.message).toContain('try a different card on the portal')
+    expect(patch.result?.recoveryUrl).toBe('https://portal.example/card')
+  })
+
+  it('already_on_tier remains an immediate success', async () => {
+    const patch = await applyUpgrade({ ok: true, status: 'already_on_tier', target_tier_name: 'Ultra' })
+
+    expect(patch.result).toMatchObject({ message: 'You are already on Ultra.', ok: true })
+    expect(patch.result).not.toHaveProperty('pendingTierId')
+  })
+
+  it('upgraded marks the result as applying to the target tier', async () => {
+    const patch = await applyUpgrade({ ok: true, status: 'upgraded', target_tier_name: 'Ultra' })
+
+    expect(patch.result).toMatchObject({ ok: true, pendingTierId: 'ultra' })
+  })
+
+  it('shows Applying, then Done once refreshed state reaches the upgraded tier', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const refreshState = vi.fn(() => Promise.resolve(subscriber({
+        current: {
+          tier_id: 'ultra',
+          tier_name: 'Ultra',
+          monthly_credits: '3000',
+          credits_remaining: '3000',
+          cycle_ends_at: '2026-08-01',
+          pending_downgrade_tier_name: null,
+          pending_downgrade_at: null
+        }
+      })))
+      const result = { message: 'Upgraded to Ultra.', ok: true, pendingTierId: 'ultra' }
+      const mounted = mount(at('result', subscriber(), { ctx: { ...ctx, refreshState }, result }))
+
+      expect(mounted.output()).toContain('Applying…')
+      await vi.advanceTimersByTimeAsync(2000)
+      mounted.rerender()
+      expect(refreshState).toHaveBeenCalledTimes(1)
+      expect(mounted.output()).toContain('Done')
+      expect(mounted.output()).toContain('Upgraded to Ultra.')
+      mounted.cleanup()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a successful upgrade soft-pending after the bounded confirmation window', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const refreshState = vi.fn(() => Promise.resolve(subscriber()))
+      const result = { message: 'Upgraded to Ultra.', ok: true, pendingTierId: 'ultra' }
+      const mounted = mount(at('result', subscriber(), { ctx: { ...ctx, refreshState }, result }))
+
+      await vi.advanceTimersByTimeAsync(30_000)
+      mounted.rerender()
+      expect(refreshState).toHaveBeenCalledTimes(15)
+      expect(mounted.output()).toContain('Still applying')
+      expect(mounted.output()).toContain('refresh in a moment')
+      expect(mounted.output()).not.toContain('Could not complete')
+      mounted.cleanup()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

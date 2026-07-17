@@ -54,7 +54,7 @@ function render(overlay: BillingOverlayState): string {
   return stripAnsi(output)
 }
 
-const billState = (): BillingStateResponse =>
+const billState = (overrides: Partial<BillingStateResponse> = {}): BillingStateResponse =>
   ({
     auto_reload: null,
     balance_display: '$12.00',
@@ -72,7 +72,8 @@ const billState = (): BillingStateResponse =>
     ok: true,
     org_name: 'Acme',
     portal_url: 'https://portal/billing',
-    role: 'OWNER'
+    role: 'OWNER',
+    ...overrides
   }) as BillingStateResponse
 
 const ctx = {
@@ -135,5 +136,50 @@ describe('BillingOverlay — overview (reordered, dollars)', () => {
     expect(out).toContain('$14.00 left of $20.00')
     expect(out).toContain('30% used')
     expect(out).toContain('never expires')
+  })
+})
+
+describe('BillingOverlay — auto-reload card divergence', () => {
+  const autoReload = (card: NonNullable<BillingStateResponse['auto_reload']>['card']) => ({
+    card,
+    enabled: true,
+    reload_to_display: '$100',
+    reload_to_usd: '100',
+    threshold_display: '$20',
+    threshold_usd: '20'
+  })
+
+  it('warns when auto-reload charges a distinct card and offers the portal hand-off', () => {
+    const out = render({
+      ...overlay('autoreload'),
+      state: billState({
+        auto_reload: autoReload({ kind: 'distinct', payment_method_id: 'pm_other', brand: 'Visa', last4: '9999' })
+      })
+    })
+
+    expect(out).toContain('Auto-refill is charging Visa ••9999 — not your card on file')
+    expect(out).toContain('authorize Nous Research to charge Visa ••9999')
+    expect(out).toContain('Use your card on file — manage on portal')
+  })
+
+  it('uses generic distinct-card copy when metadata is unresolved', () => {
+    const out = render({
+      ...overlay('autoreload'),
+      state: billState({
+        auto_reload: autoReload({ kind: 'distinct', payment_method_id: 'pm_other', brand: null, last4: null })
+      })
+    })
+
+    expect(out).toContain('Auto-refill is charging a different card — not your card on file')
+  })
+
+  it.each(['canonical', 'none'] as const)('does not warn for a %s auto-reload card', kind => {
+    const out = render({
+      ...overlay('autoreload'),
+      state: billState({ auto_reload: autoReload({ kind }) })
+    })
+
+    expect(out).not.toContain('not your card on file')
+    expect(out).not.toContain('Use your card on file — manage on portal')
   })
 })

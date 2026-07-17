@@ -18,6 +18,9 @@ import type { Theme } from '../theme.js'
 
 import { ActionRow, footer, MenuRow, UsageBars } from './overlayPrimitives.js'
 
+const UPGRADE_CONFIRM_INTERVAL_MS = 2000
+const UPGRADE_CONFIRM_ATTEMPTS = 15
+
 interface SubscriptionOverlayProps {
   /** Close the overlay entirely. */
   onClose: () => void
@@ -72,6 +75,10 @@ interface Row {
   color?: string
   label: string
   run: () => void
+}
+
+interface SubscriptionResultWithPending extends SubscriptionResult {
+  pendingTierId?: null | string
 }
 
 /** ↑/↓ + Enter + number-key selection over `rows`; Esc runs `onEscape`. */
@@ -138,7 +145,7 @@ function mutationResult(r: null | { message?: string; ok?: boolean }, okMessage:
 }
 
 /** Map an upgrade response, routing SCA / decline to a portal recovery. */
-function upgradeResult(r: null | SubscriptionUpgradeResponse): SubscriptionResult {
+function upgradeResult(r: null | SubscriptionUpgradeResponse, pendingTierId?: null | string): SubscriptionResultWithPending {
   if (!r) {
     // null = a transport failure (WS drop / request timeout) on the CHARGING
     // route — NAS may have already prorated + charged. Report it as ambiguous and
@@ -151,13 +158,34 @@ function upgradeResult(r: null | SubscriptionUpgradeResponse): SubscriptionResul
     }
   }
 
-  if (r.ok && (r.status === 'already_on_tier' || r.status === 'upgraded')) {
+  if (r.reason === 'authentication_required' || r.reason === 'subscription_payment_intent_requires_action') {
     return {
-      message:
-        r.status === 'already_on_tier'
-          ? `You are already on ${r.target_tier_name ?? 'this plan'}.`
-          : `Upgraded to ${r.target_tier_name ?? 'your new plan'}. Your new monthly credits land in a moment.`,
+      message: 'Please verify your card in the portal to finish this upgrade.',
+      ok: false,
+      recoveryUrl: r.recovery_url ?? null
+    }
+  }
+
+  if (r.reason === 'card_declined') {
+    return {
+      message: 'Your card was declined — try a different card on the portal.',
+      ok: false,
+      recoveryUrl: r.recovery_url ?? null
+    }
+  }
+
+  if (r.ok && r.status === 'already_on_tier') {
+    return {
+      message: `You are already on ${r.target_tier_name ?? 'this plan'}.`,
       ok: true
+    }
+  }
+
+  if (r.ok && r.status === 'upgraded') {
+    return {
+      message: `Upgraded to ${r.target_tier_name ?? 'your new plan'}. Your new monthly credits land in a moment.`,
+      ok: true,
+      pendingTierId: pendingTierId ?? null
     }
   }
 
@@ -196,7 +224,7 @@ function stepUpDenialResult(res: { error?: string; message?: string }): Subscrip
 
   return {
     message:
-      res.message || 'Terminal billing was not enabled — an org admin/owner must allow it for this org. You can also make this change on the portal.',
+      res.message || 'Terminal billing was not enabled — someone with billing permissions (owner, admin, or finance admin) must allow it for this org. You can also make this change on the portal.',
     ok: false
   }
 }
@@ -281,7 +309,9 @@ function applyPendingAndRoute(
   }
 
   if (pending.kind === 'upgrade') {
-    return ctx.upgrade(pending.targetTierId ?? '', pending.idempotencyKey).then(r => (isScopeDenial(r) ? toStepUp() : finish(upgradeResult(r))))
+    return ctx.upgrade(pending.targetTierId ?? '', pending.idempotencyKey).then(r =>
+      isScopeDenial(r) ? toStepUp() : finish(upgradeResult(r, pending.targetTierId))
+    )
   }
 
   return ctx.scheduleChange(pending.targetTierId ?? '').then(r =>
@@ -687,8 +717,72 @@ function ConfirmScreen({ onClose, onPatch, overlay, t }: ScreenProps) {
 
 function ResultScreen({ onClose, overlay, t }: Omit<ScreenProps, 'onPatch'>) {
   const { ctx } = overlay
-  const result: null | SubscriptionResult = overlay.result ?? null
+  const result = (overlay.result ?? null) as null | SubscriptionResultWithPending
   const recoveryUrl = result?.recoveryUrl ?? null
+  const pendingTierId = result?.pendingTierId ?? null
+  const [applyState, setApplyState] = useState<'applying' | 'confirmed' | 'timed_out'>(
+    pendingTierId ? 'applying' : 'confirmed'
+  )
+
+  useEffect(() => {
+    if (!pendingTierId) {
+      return
+    }
+
+    let attempts = 0
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const scheduleOrFinish = () => {
+      if (cancelled) {
+        return
+      }
+
+      if (attempts >= UPGRADE_CONFIRM_ATTEMPTS) {
+        setApplyState('timed_out')
+
+        return
+      }
+
+      timer = setTimeout(tick, UPGRADE_CONFIRM_INTERVAL_MS)
+    }
+
+    const tick = () => {
+      attempts += 1
+      void ctx
+        .refreshState()
+        .then(fresh => {
+          if (cancelled) {
+            return
+          }
+
+          if (fresh?.current?.tier_id === pendingTierId) {
+            setApplyState('confirmed')
+
+            return
+          }
+
+          scheduleOrFinish()
+        })
+        .catch(scheduleOrFinish)
+    }
+
+    timer = setTimeout(tick, UPGRADE_CONFIRM_INTERVAL_MS)
+
+    return () => {
+      cancelled = true
+
+      if (timer) {
+        clearTimeout(timer)
+      }
+    }
+  }, [ctx, pendingTierId])
+
+  const applying = result?.ok && applyState === 'applying'
+  const timedOut = result?.ok && applyState === 'timed_out'
+  const message = timedOut
+    ? 'Your upgrade succeeded and is still applying — refresh in a moment.'
+    : (result?.message ?? '')
 
   const openRecovery = () => {
     if (recoveryUrl) {
@@ -707,10 +801,10 @@ function ResultScreen({ onClose, overlay, t }: Omit<ScreenProps, 'onPatch'>) {
   return (
     <Box flexDirection="column">
       <Text bold color={result?.ok ? t.color.ok : t.color.warn}>
-        {result?.ok ? 'Done' : 'Could not complete'}
+        {applying ? 'Applying…' : timedOut ? 'Still applying' : result?.ok ? 'Done' : 'Could not complete'}
       </Text>
-      <Text color={t.color.text}>{result?.message ?? ''}</Text>
-      {result?.ok && <Text color={t.color.muted}>Re-run /subscription anytime to review it.</Text>}
+      <Text color={t.color.text}>{message}</Text>
+      {result?.ok && !applying && !timedOut && <Text color={t.color.muted}>Re-run /subscription anytime to review it.</Text>}
       <Text />
       {rows.map((row, i) => (
         <ActionRow active={sel === i} color={row.color} key={row.label} label={row.label} t={t} />
@@ -820,7 +914,7 @@ function StepUpScreen({ onPatch, overlay, t }: ScreenProps) {
       {phase === 'prompt' && (
         <>
           <Text color={t.color.text}>Changing your plan needs terminal billing enabled for this org. Enable it here, then continue.</Text>
-          <Text color={t.color.muted}>An org admin/owner approves it once in the browser.</Text>
+          <Text color={t.color.muted}>Someone with billing permissions (owner, admin, or finance admin) approves it once in the browser.</Text>
         </>
       )}
       {phase === 'waiting' && (
