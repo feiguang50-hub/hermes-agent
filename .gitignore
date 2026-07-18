@@ -165,3 +165,17 @@ curator_hooks_real_audit_before_fix1.jsonl
 
 # Token-reading debug script (untracked, contains credential reading code)
 read_cred.ps1
+
+
+# curator-hooks 一次性 helper 脚本（不入主版本库，整理在 scripts/curator_hooks_test/）
+_append_gitignore.py
+_fix_callers.py
+_fix_callers2.py
+_fix_callers3.py
+debug_candidate_list.py
+debug_run_curator.py
+debug_config.py
+init_hermes_config.py
+init_real_curator_test.py
+run_real_curator_dryrun.py
+scripts/curator_hooks_test/
