@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import get_hermes_home
 from agent.skill_utils import is_excluded_skill_path, is_external_skill_path
+from tools.skill_provenance import is_background_review
 
 logger = logging.getLogger(__name__)
 
@@ -665,7 +666,17 @@ def bump_view(skill_name: str) -> None:
 
     Tracks every skill regardless of provenance — built-ins and hub skills
     included. Usage telemetry is observability, not a curation signal.
+
+    No-op when called from the curator's background-review fork (the LLM
+    is inspecting candidates, not consuming them). Without this guard the
+    curator's own audit reads would refresh ``last_viewed_at`` /
+    ``last_used_at`` on every candidate, defeating the inactivity clock
+    that drives stale/archive decisions. See agent/curator.py::_run_llm_review
+    for the matching ``_memory_write_origin = "background_review"`` set
+    on the review fork.
     """
+    if is_background_review():
+        return
     def _apply(rec: Dict[str, Any]) -> None:
         rec["view_count"] = int(rec.get("view_count") or 0) + 1
         rec["last_viewed_at"] = _now_iso()
@@ -677,7 +688,12 @@ def bump_use(skill_name: str) -> None:
     (e.g. loaded into the prompt path or referenced from an assistant turn).
 
     Tracks every skill regardless of provenance.
+
+    No-op in the curator's background-review fork — see bump_view's docstring
+    for the rationale.
     """
+    if is_background_review():
+        return
     def _apply(rec: Dict[str, Any]) -> None:
         rec["use_count"] = int(rec.get("use_count") or 0) + 1
         rec["last_used_at"] = _now_iso()

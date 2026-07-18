@@ -1740,6 +1740,9 @@ def _skill_view_with_bump(args, **kw):
             resolved = parsed.get("name") or name
             if resolved:
                 from tools.skill_usage import bump_use, bump_view
+                # bump_view / bump_use internally short-circuit when called
+                # from the curator's background-review fork, so curator
+                # inspection reads don't reset the inactivity timer.
                 bump_view(str(resolved))
                 # A skill_view tool call is the agent actively loading the skill
                 # to act on it — that counts as use, not just a browse/view.
