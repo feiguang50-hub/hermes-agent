@@ -89,9 +89,19 @@ def _state_file() -> Path:
 def _default_state() -> Dict[str, Any]:
     return {
         "last_run_at": None,
+        # The timestamp of the LAST run that completed without raising. This
+        # is what ``should_run_now`` keys off — not ``last_run_at``, which is
+        # set before the LLM pass and therefore reflects attempts, not
+        # outcomes. A failed curator pass leaves ``last_success_at`` alone,
+        # so a transient provider error doesn't suppress the next attempt
+        # for a full interval. ``last_run_at`` is preserved for human-facing
+        # status display (``hermes curator status``); new code should prefer
+        # ``last_success_at``.
+        "last_success_at": None,
         "last_run_duration_seconds": None,
         "last_run_summary": None,
         "last_run_summary_shown_at": None,
+        "last_failure_reason": None,
         "last_report_path": None,
         "paused": False,
         "run_count": 0,
@@ -257,7 +267,8 @@ def should_run_now(now: Optional[datetime] = None) -> bool:
         return False
 
     state = load_state()
-    last = _parse_iso(state.get("last_run_at"))
+    # Prefer last_success_at; fall back to last_run_at for legacy state files.
+    last = _parse_iso(state.get("last_success_at") or state.get("last_run_at"))
     if last is None:
         # Never run before. Seed state so we wait a full interval before the
         # first real pass. Report-only; do not auto-mutate the library the
@@ -1572,13 +1583,15 @@ def run_curator_review(
 
     # Persist state before the LLM pass so a crash mid-review still records
     # the run and doesn't immediately re-trigger. In dry-run we do NOT bump
-    # last_run_at or run_count — a preview shouldn't push the next scheduled
-    # real pass out. We still record a summary so `hermes curator status`
-    # shows that a preview ran.
+    # last_run_at, last_success_at, or run_count — a preview shouldn't push
+    # the next scheduled real pass out. We still record a summary so
+    # `hermes curator status` shows that a preview ran.
+    #
+    # The success-clock (``last_success_at`` / ``last_run_at`` / ``run_count``)
+    # is bumped ONLY after the LLM pass completes successfully — see below.
+    # Writing those fields here would suppress the next retry for a full
+    # interval even if this run blew up, which is the bug we just fixed.
     state = load_state()
-    if not dry_run:
-        state["last_run_at"] = start.isoformat()
-        state["run_count"] = int(state.get("run_count", 0)) + 1
     prefix = "dry-run auto: " if dry_run else "auto: "
     state["last_run_summary"] = f"{prefix}{auto_summary}"
     save_state(state)
@@ -1631,6 +1644,12 @@ def run_curator_review(
                     state2["last_report_path"] = str(report_path)
             except Exception as e:
                 logger.debug("Curator report write failed: %s", e, exc_info=True)
+            # consolidation-off is a successful no-op pass — bump the
+            # success clock so should_run_now sees a fresh success.
+            if not dry_run:
+                state2["last_success_at"] = start.isoformat()
+                state2["last_run_at"] = start.isoformat()
+                state2["run_count"] = int(state2.get("run_count", 0)) + 1
             save_state(state2)
             if on_summary:
                 try:
@@ -1692,6 +1711,13 @@ def run_curator_review(
                 "tool_calls": [],
                 "error": str(e),
             }
+            # Record the failure so should_run_now still treats the next
+            # interval as "no successful run yet" — the LLM pass has to
+            # complete at least once for the backoff to apply.
+            state_fail = load_state()
+            state_fail["last_failure_reason"] = str(e)[:500]
+            # intentionally do NOT touch last_success_at / last_run_at /
+            # run_count here.
 
         # Append the rename map (`old-name → umbrella`) to the user-visible
         # summary so people don't have to dig into REPORT.md to find out where
@@ -1736,6 +1762,14 @@ def run_curator_review(
                 state2["last_report_path"] = str(report_path)
         except Exception as e:
             logger.debug("Curator report write failed: %s", e, exc_info=True)
+
+        # Only bump the success clock on a clean LLM pass. Errors above
+        # (exception caught into llm_meta["error"]) still reach this line,
+        # so we additionally guard on llm_meta["error"].
+        if not dry_run and not llm_meta.get("error"):
+            state2["last_success_at"] = start.isoformat()
+            state2["last_run_at"] = start.isoformat()
+            state2["run_count"] = int(state2.get("run_count", 0)) + 1
 
         save_state(state2)
 
