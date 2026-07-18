@@ -33,18 +33,20 @@ HARDLINE rules a maintainer enforces in review:
 
 Frontmatter:
 - name: lowercase-hyphenated, <=64 chars, no spaces.
-- description: ONE sentence, **<=60 characters**, ends with a period. State the
+- description: ONE sentence, **<=200 characters**, ends with a period. State the
   capability, not the implementation. No marketing words (powerful,
   comprehensive, seamless, advanced, robust). Do NOT repeat the skill name. If
   the description contains a colon, wrap the whole value in double quotes.
   This is the most-violated rule and it is NOT cosmetic: the system-prompt
-  skill index truncates the description to 60 chars and loads it every
-  session, so anything past char 60 is silently cut and never routes. After
-  you write the description, COUNT the characters; if it is over 60, cut it
+  skill index truncates the description to 200 chars and loads it every
+  session, so anything past char 200 is silently cut and never routes. After
+  you write the description, COUNT the characters; if it is over 200, cut it
   down before saving — do not ship a sentence and hope.
-    Good (<=60): `Search arXiv papers by keyword, author, or ID.`
-    Bad (123):   `A comprehensive skill that lets the agent search arXiv for
-                  academic papers using keywords, authors, and categories.`
+    Good (<=200): `Search arXiv papers by keyword, author, or ID, with
+                  field filters and date ranges.`
+    Bad (260):    `A comprehensive skill that lets the agent search arXiv for
+                  academic papers using keywords, authors, categories, and
+                  date ranges with sensible defaults for biology and CS.`
 - version: 0.1.0
 - author: always the literal value `Hermes`. NEVER fill it from the host
   environment — the OS/login username (e.g. the `user=` line in your

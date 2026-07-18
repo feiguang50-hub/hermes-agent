@@ -781,14 +781,31 @@ def resolve_skill_config_values(
 
 
 def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
-    """Extract a truncated description from parsed frontmatter."""
+    """Extract a truncated description from parsed frontmatter for routing.
+
+    The default routing truncates to 200 characters. Anything past that is
+    cut with a trailing ``...`` so the model still sees the front of the
+    sentence and can pattern-match.
+
+    History: this used to be 60 chars, which was conservative for older
+    models. With current context windows the routing index fits 73 skills
+    comfortably at 200 chars per row, and 200 captures a full capability
+    sentence for almost every skill in the corpus. New skills should aim
+    for ``<=200 chars`` per ``learn_prompt._AUTHORING_STANDARDS``.
+    """
     raw_desc = frontmatter.get("description", "")
     if not raw_desc:
         return ""
     desc = str(raw_desc).strip().strip("'\"")
-    if len(desc) > 60:
-        return desc[:57] + "..."
+    if len(desc) > _ROUTING_DESCRIPTION_MAX:
+        return desc[: _ROUTING_DESCRIPTION_MAX - 3] + "..."
     return desc
+
+
+# Single source of truth for how long the routing index lets a description
+# be. ``learn_prompt`` / tests import this so the prompt and the runtime
+# stay in sync.
+_ROUTING_DESCRIPTION_MAX = 200
 
 
 # ── File iteration ────────────────────────────────────────────────────────
