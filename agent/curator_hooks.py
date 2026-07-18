@@ -420,11 +420,11 @@ def curator_pre_tool_call_hook(
         return None
     # Diagnostic: log every pre_tool_call invocation when the curator
     # hook context is active, so we can see the hook fired even when
-    # the tool isn't skill_manage. Cheap (one JSONL line per call) and
-    # indispensable for verifying the hook is wired into the real
-    # conversation loop. Set CURATOR_HOOK_DEBUG=0 to silence.
+    # the tool isn't skill_manage or terminal. Cheap (one JSONL line per
+    # call) and indispensable for verifying the hook is wired into the
+    # real conversation loop. Set CURATOR_HOOK_DEBUG=0 to silence.
     _observed = os.environ.get("CURATOR_HOOK_DEBUG", "1") != "0"
-    if _observed and tool_name != "skill_manage":
+    if _observed and tool_name not in ("skill_manage", "terminal"):
         _write_audit({
             "ts": datetime.now(timezone.utc).isoformat(),
             "hook": "pre_tool_call",
@@ -434,9 +434,18 @@ def curator_pre_tool_call_hook(
             "name": None,
             "tool_call_id": tool_call_id,
             "session_id": session_id,
-            "note": "curator hook context active but tool != skill_manage; skipping check",
+            "note": "curator hook context active but tool != skill_manage/terminal; skipping check",
         })
         return None
+    # Bug #2 fix: terminal calls can mutate skill files via shell commands
+    # (rm/mv/cp/redirect/sed -i etc.), bypassing the skill_manage guard.
+    # Detect mutating shell commands that target skill paths and apply the
+    # same dry-run / retention semantics as skill_manage.
+    if tool_name == "terminal":
+        return _check_terminal_skill_mutation(
+            args=args, state=state,
+            tool_call_id=tool_call_id, session_id=session_id,
+        )
     if tool_name != "skill_manage":
         return None
     if not isinstance(args, dict):
@@ -801,3 +810,214 @@ def unregister_curator_hooks() -> bool:
 
 def are_hooks_registered() -> bool:
     return _HOOKS_REGISTERED
+
+
+# ---------------------------------------------------------------------------
+# Bug #2 fix: terminal tool can mutate skill files via shell commands,
+# bypassing the skill_manage dry-run and retention guards. This block
+# detects mutating shell commands that target skill paths and applies
+# the same dry-run / approval-gate semantics as skill_manage.
+# ---------------------------------------------------------------------------
+
+# Shell tokens / patterns that mutate the filesystem. Conservative: only
+# match clear destruction / replacement, NOT mkdir/chmod/touch which are
+# often legitimate setup.
+_MUTATING_SHELL_PATTERNS: Tuple[str, ...] = (
+    r"\brm\b(?!\s+--)",                       # rm, but not rm --help/--version
+    r"\bmv\b",                                # mv = delete source + create dest
+    r"\bcp\b",                                # cp into skill dir = new file
+    r"\bsed\s+-i\b",                          # in-place edit
+    r"\bperl\s+-i\b",                         # in-place edit (perl)
+    r"\btee\b",                               # writes to file
+    r"\bdd\b[^|;]*\bof=",                     # dd ... of=path (overwrites)
+    r">>\s*\S|>\s*[~./\w]",                   # > or >> redirect to any non-space
+    r"\btruncate\b",                          # explicit truncate
+)
+
+
+def _is_mutating_shell_command(command: str) -> bool:
+    """Return True if *command* likely mutates files."""
+    if not command:
+        return False
+    for pat in _MUTATING_SHELL_PATTERNS:
+        if re.search(pat, command):
+            return True
+    return False
+
+
+def _extract_paths_from_command(command: str) -> List[str]:
+    """Extract path-like tokens from a shell command.
+
+    Conservative: returns /-prefixed, ~/, ./, ../, absolute (POSIX or
+    Windows), or any token containing '/' or '\\'. Bare names without
+    '/' (e.g. ``baz`` in ``cp foo bar baz``) are NOT included — too
+    ambiguous, would produce false positives like matching ``baz`` to a
+    path called ``baz`` somewhere in skills.
+    """
+    if not command:
+        return []
+    # Split on whitespace + shell metacharacters (but NOT backslash —
+    # backslash is a path separator on Windows).
+    tokens = re.split(r'[\s|&;()<>"\'`]+', command)
+    paths: List[str] = []
+    for tok in tokens:
+        if not tok:
+            continue
+        if tok.startswith("-"):
+            continue
+        if tok in {"if", "then", "else", "fi", "do", "done", "for", "in", "while", "and", "or", "not"}:
+            continue
+        is_path_like = (
+            tok.startswith("/")
+            or tok.startswith("~/")
+            or tok.startswith("./")
+            or tok.startswith("../")
+            or "/" in tok
+            or "\\" in tok
+            or (len(tok) >= 2 and tok[1] == ":")  # Windows drive letter like C:
+            or tok in {".", ".."}
+        )
+        if not is_path_like:
+            continue
+        # Strip trailing punctuation that may have leaked through (e.g.
+        # ``cp /tmp/bar.`` — the ``.`` is end-of-sentence, not a path).
+        tok = tok.rstrip(".,:;")
+        if tok:
+            paths.append(tok)
+    return paths
+
+
+def _path_under_skill_root(path: str, skill_dirs: List[Path]) -> Optional[Path]:
+    """If *path* resolves to somewhere under one of *skill_dirs*, return
+    the resolved Path. Otherwise None."""
+    if not path:
+        return None
+    try:
+        expanded = os.path.expanduser(path)
+        resolved = Path(expanded).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    for d in skill_dirs:
+        try:
+            d_resolved = d.resolve()
+            # Will raise ValueError if not under
+            rel = resolved.relative_to(d_resolved)
+            # Reject the root itself; we want paths INSIDE a skill
+            if str(rel) in (".", ""):
+                continue
+            return resolved
+        except (ValueError, OSError):
+            continue
+        except Exception:
+            continue
+    return None
+
+
+def _check_terminal_skill_mutation(
+    *,
+    args: Optional[Dict[str, Any]],
+    state: Dict[str, Any],
+    tool_call_id: str,
+    session_id: str,
+) -> Optional[Dict[str, Any]]:
+    """If a curator-context terminal call mutates a skill path, apply the
+    same dry-run / approval-gate rules as skill_manage would.
+
+    Returns:
+      - ``{"action": "block"}`` in dry-run mode when the command mutates
+        any path under a skill directory.
+      - ``{"action": "approve", ...}`` in real execution so the existing
+        ``tools.approval.request_tool_approval`` gate can prompt the
+        human. The LLM should not have used terminal for skill mutation
+        in the first place — it bypasses content validation.
+      - ``None`` when the command is non-mutating or doesn't touch skill
+        paths (legitimate terminal use is allowed).
+    """
+    if not isinstance(args, dict):
+        return None
+    command = args.get("command") or ""
+    if not isinstance(command, str) or not command.strip():
+        return None
+
+    if not _is_mutating_shell_command(command):
+        return None
+
+    # Resolve skill directories. Fail open (return None) if the helper
+    # can't be imported — better to allow and log than crash the hook.
+    try:
+        from agent.skill_utils import get_all_skills_dirs
+        skill_dirs = [Path(d) for d in (get_all_skills_dirs() or [])]
+    except Exception as e:
+        logger.debug("_check_terminal_skill_mutation: get_all_skills_dirs failed: %s", e)
+        skill_dirs = []
+
+    if not skill_dirs:
+        # If we can't determine skill roots, we can't safely gate. Log
+        # to audit and allow (a curator without skill dir info shouldn't
+        # block all terminal calls).
+        _write_audit({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "hook": "pre_tool_call",
+            "verdict": "allow_terminal_no_skill_dirs",
+            "tool": "terminal",
+            "command_preview": command[:_AUDIT_ARG_TRUNCATE],
+            "tool_call_id": tool_call_id,
+            "session_id": session_id,
+            "note": "could not resolve skill directories; terminal check skipped",
+        })
+        return None
+
+    hit_paths: List[Tuple[str, Path]] = []
+    for token in _extract_paths_from_command(command):
+        sp = _path_under_skill_root(token, skill_dirs)
+        if sp is not None:
+            hit_paths.append((token, sp))
+
+    if not hit_paths:
+        return None
+
+    target_display = ", ".join(t for t, _ in hit_paths)
+
+    if state.get("dry_run"):
+        message = (
+            f"[curator-guard] DRY-RUN mode is active: terminal command "
+            f"that mutates skill path(s) ({target_display}) is BLOCKED. "
+            f"Use skill_manage instead of terminal for skill mutations. "
+            f"(Bug #2 fix: terminal was bypassing the curator dry-run guard.)"
+        )
+        _write_audit({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "hook": "pre_tool_call",
+            "verdict": "block_dry_run_terminal",
+            "tool": "terminal",
+            "command_preview": command[:_AUDIT_ARG_TRUNCATE],
+            "skill_paths": [str(p) for _, p in hit_paths],
+            "tool_call_id": tool_call_id,
+            "session_id": session_id,
+            "message": message,
+        })
+        return {"action": "block", "message": message}
+
+    # Real execution: escalate to approval gate
+    message = (
+        f"[curator-guard] terminal command mutates skill path(s) "
+        f"({target_display}). The curator should use skill_manage for "
+        f"skill mutations; using terminal bypasses content validation. "
+        f"Escalating to human-approval gate."
+    )
+    _write_audit({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "hook": "pre_tool_call",
+        "verdict": "approve_terminal_skill_mutation",
+        "tool": "terminal",
+        "command_preview": command[:_AUDIT_ARG_TRUNCATE],
+        "skill_paths": [str(p) for _, p in hit_paths],
+        "tool_call_id": tool_call_id,
+        "session_id": session_id,
+        "message": message,
+    })
+    return {
+        "action": "approve",
+        "message": message,
+        "rule_key": "curator_guard:terminal:skill_mutation",
+    }
