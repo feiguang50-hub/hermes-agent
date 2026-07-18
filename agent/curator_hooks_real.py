@@ -226,6 +226,32 @@ def _build_realistic_operations() -> list[dict]:
                 ),
             },
         },
+        {
+            "category": "create umbrella (WITH merged_skills mentioning absorbed skill — should allow)",
+            "args": {
+                "action": "create",
+                "name": "vague-umbrella",
+                "merged_skills": ["vague-thing", "vague-utility"],
+                "file_content": (
+                    "# Vague Umbrella\n\n"
+                    "Class-level umbrella covering vague-thing and vague-utility.\n"
+                    "This skill consolidates the two absorbed siblings under one entry.\n"
+                ),
+            },
+        },
+        {
+            "category": "create umbrella (WITH merged_skills but content ignores them — should escalate)",
+            "args": {
+                "action": "create",
+                "name": "vague-umbrella",
+                "merged_skills": ["vague-thing", "vague-utility"],
+                "file_content": (
+                    "# Vague Umbrella\n\n"
+                    "A collection of helpful utilities for various tasks.\n"
+                    "Use when you need to do things.\n"
+                ),
+            },
+        },
 
         # ===== Operation against a skill with CJK chars in description =====
         {

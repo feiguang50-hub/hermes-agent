@@ -56,6 +56,21 @@ _MUTATING_ACTIONS = frozenset({"patch", "create", "write_file", "delete"})
 # fields we scan for keyword retention.
 _CONTENT_FIELDS = ("file_content", "content", "new_string")
 
+# Argument names the LLM may use to declare which technical skills are
+# being absorbed into an umbrella during a ``create`` call. When any of
+# these is present, the keyword-retention check uses the union of the
+# umbrella's keywords AND the absorbed skills' keywords — so the LLM
+# satisfies the gate by mentioning at least one absorbed skill's name
+# in the new content, rather than having to self-reference the
+# umbrella itself.
+_MERGED_SKILLS_KEYS = (
+    "merged_skills",
+    "absorbed_from",
+    "source_skills",
+    "cluster_members",
+    "absorbed_skills",
+)
+
 # Cap on content size we pass to the audit log (full content may be huge
 # for a SKILL.md patch — we only need a preview for forensics).
 _AUDIT_ARG_TRUNCATE = 200
@@ -448,7 +463,10 @@ def curator_pre_tool_call_hook(
         })
         return None
 
-    keywords = _get_keywords_for(state, target_str)
+    keywords = _get_keywords_for(
+        state, target_str,
+        extra_skills=_extract_merged_skills(function_args),
+    )
     if not keywords:
         return None  # nothing to compare against
 
@@ -545,12 +563,56 @@ def curator_pre_tool_call_hook(
     return None
 
 
-def _get_keywords_for(state: Dict[str, Any], skill_name: str) -> List[str]:
-    """Lazy-load and cache keywords for *skill_name* on the thread state."""
+def _get_keywords_for(
+    state: Dict[str, Any],
+    skill_name: str,
+    extra_skills: Optional[List[str]] = None,
+) -> List[str]:
+    """Lazy-load and cache keywords for *skill_name* on the thread state.
+
+    When *extra_skills* is provided, the returned list is the union of
+    the target's keywords and each extra skill's keywords (deduped,
+    order-preserving, target first). This is how the umbrella-creation
+    rule works: instead of demanding the new content mention the
+    umbrella's own name, we accept mention of any of the absorbed
+    technical skills' names.
+
+    Caching key includes the extra_skills tuple so different umbrella
+    compositions don't collide.
+    """
     cache = state["skills_seen"]
-    if skill_name in cache:
+    cache_key: Optional[Tuple[str, ...]] = None
+    if extra_skills:
+        cache_key = (skill_name, *sorted(set(extra_skills)))
+    if cache_key is not None and cache_key in cache:
+        return cache[cache_key]
+    if cache_key is None and skill_name in cache:
         return cache[skill_name]
-    # Find the first skills dir that contains a directory of this name
+
+    keywords: List[str] = list(_load_skill_keywords(skill_name))
+
+    for extra in extra_skills or []:
+        if not isinstance(extra, str) or not extra or extra == skill_name:
+            continue
+        keywords.extend(_load_skill_keywords(extra))
+
+    # Deduplicate while preserving order
+    seen = set()
+    deduped: List[str] = []
+    for k in keywords:
+        if k and k not in seen:
+            seen.add(k)
+            deduped.append(k)
+
+    if cache_key is not None:
+        cache[cache_key] = deduped
+    else:
+        cache[skill_name] = deduped
+    return deduped
+
+
+def _load_skill_keywords(skill_name: str) -> List[str]:
+    """Read a skill's keywords from disk (or return name-only fallback)."""
     path = None
     try:
         from agent.skill_utils import get_all_skills_dirs
@@ -560,10 +622,38 @@ def _get_keywords_for(state: Dict[str, Any], skill_name: str) -> List[str]:
                 path = candidate
                 break
     except Exception as e:
-        logger.debug("_get_keywords_for: lookup failed: %s", e)
-    keywords = extract_skill_keywords(skill_name, path)
-    cache[skill_name] = keywords
-    return keywords
+        logger.debug("_load_skill_keywords: lookup failed: %s", e)
+    return extract_skill_keywords(skill_name, path)
+
+
+def _extract_merged_skills(args: Dict[str, Any]) -> List[str]:
+    """Pull a list of absorbed/merged skill names from the tool call args.
+
+    Accepts a single string or a list of strings under any of the keys
+    listed in ``_MERGED_SKILLS_KEYS``. Returns deduplicated, order-
+    preserving list (first occurrence wins).
+    """
+    seen = set()
+    out: List[str] = []
+    for key in _MERGED_SKILLS_KEYS:
+        v = args.get(key)
+        if isinstance(v, str):
+            candidates = [v]
+        elif isinstance(v, list):
+            candidates = [x for x in v if isinstance(x, str)]
+        elif isinstance(v, dict):
+            # tolerate ``{"skills": [...]}`` shape
+            inner = v.get("skills") or v.get("names")
+            candidates = inner if isinstance(inner, list) else []
+            candidates = [x for x in candidates if isinstance(x, str)]
+        else:
+            continue
+        for c in candidates:
+            c = c.strip()
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+    return out
 
 
 # ---------------------------------------------------------------------------
