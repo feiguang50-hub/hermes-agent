@@ -57,14 +57,14 @@ def _now() -> str:
 def _simulate_call(label: str, args: dict, dry_run: bool) -> None:
     """Drive a single pre/post tool-call cycle as if the LLM made it."""
     curator_hooks.curator_pre_tool_call_hook(
-        function_name="skill_manage",
-        function_args=args,
+        tool_name="skill_manage",
+        args=args,
         tool_call_id=f"tc_{int(time.time()*1000)}",
         session_id="real-data-run",
     )
     curator_hooks.curator_post_tool_call_hook(
-        function_name="skill_manage",
-        function_args=args,
+        tool_name="skill_manage",
+        args=args,
         result='{"ok": true, "simulated": true}',
         tool_call_id=f"tc_{int(time.time()*1000)}",
         session_id="real-data-run",

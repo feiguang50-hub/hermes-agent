@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -375,8 +376,8 @@ def _preview_result(result: Any) -> str:
 
 def curator_pre_tool_call_hook(
     *,
-    function_name: str,
-    function_args: Optional[Dict[str, Any]] = None,
+    tool_name: str = "",
+    args: Optional[Dict[str, Any]] = None,
     task_id: str = "",
     session_id: str = "",
     tool_call_id: str = "",
@@ -386,6 +387,11 @@ def curator_pre_tool_call_hook(
     **_unused: Any,
 ) -> Optional[Dict[str, Any]]:
     """Curator-only pre-tool-call hook.
+
+    Parameter names mirror the Hermes invoke_hook contract: ``tool_name``
+    and ``args`` (not ``tool_name`` / ``args``). See
+    ``hermes_cli/plugins.py::_get_pre_tool_call_directive_details`` and
+    ``invoke_hook("pre_tool_call", tool_name=..., args=..., ...)``.
 
     Behavior:
 
@@ -412,16 +418,35 @@ def curator_pre_tool_call_hook(
     state = _state()
     if state is None:
         return None
-    if function_name != "skill_manage":
+    # Diagnostic: log every pre_tool_call invocation when the curator
+    # hook context is active, so we can see the hook fired even when
+    # the tool isn't skill_manage. Cheap (one JSONL line per call) and
+    # indispensable for verifying the hook is wired into the real
+    # conversation loop. Set CURATOR_HOOK_DEBUG=0 to silence.
+    _observed = os.environ.get("CURATOR_HOOK_DEBUG", "1") != "0"
+    if _observed and tool_name != "skill_manage":
+        _write_audit({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "hook": "pre_tool_call",
+            "verdict": "observed",
+            "tool": tool_name,
+            "action": None,
+            "name": None,
+            "tool_call_id": tool_call_id,
+            "session_id": session_id,
+            "note": "curator hook context active but tool != skill_manage; skipping check",
+        })
         return None
-    if not isinstance(function_args, dict):
+    if tool_name != "skill_manage":
+        return None
+    if not isinstance(args, dict):
         return None
 
-    action = function_args.get("action")
+    action = args.get("action")
     if action not in _MUTATING_ACTIONS:
         return None
 
-    target = function_args.get("name")
+    target = args.get("name")
     target_str = target if isinstance(target, str) and target else ""
 
     # ===== (a) Dry-run hard block =====
@@ -437,10 +462,10 @@ def curator_pre_tool_call_hook(
             "ts": datetime.now(timezone.utc).isoformat(),
             "hook": "pre_tool_call",
             "verdict": "block_dry_run",
-            "tool": function_name,
+            "tool": tool_name,
             "action": action,
             "name": target_str,
-            "args": _scrub_args(function_args),
+            "args": _scrub_args(args),
             "tool_call_id": tool_call_id,
             "session_id": session_id,
             "message": message,
@@ -454,7 +479,7 @@ def curator_pre_tool_call_hook(
             "ts": datetime.now(timezone.utc).isoformat(),
             "hook": "pre_tool_call",
             "verdict": "allow_no_target",
-            "tool": function_name,
+            "tool": tool_name,
             "action": action,
             "name": target_str,
             "tool_call_id": tool_call_id,
@@ -465,7 +490,7 @@ def curator_pre_tool_call_hook(
 
     keywords = _get_keywords_for(
         state, target_str,
-        extra_skills=_extract_merged_skills(function_args),
+        extra_skills=_extract_merged_skills(args),
     )
     if not keywords:
         return None  # nothing to compare against
@@ -473,7 +498,7 @@ def curator_pre_tool_call_hook(
     # Concatenate every content field the LLM may have set
     haystack_parts: List[str] = []
     for key in _CONTENT_FIELDS:
-        v = function_args.get(key)
+        v = args.get(key)
         if isinstance(v, str):
             haystack_parts.append(v)
     haystack = "\n".join(haystack_parts)
@@ -484,7 +509,7 @@ def curator_pre_tool_call_hook(
             "ts": datetime.now(timezone.utc).isoformat(),
             "hook": "pre_tool_call",
             "verdict": "allow_no_content",
-            "tool": function_name,
+            "tool": tool_name,
             "action": action,
             "name": target_str,
             "tool_call_id": tool_call_id,
@@ -526,13 +551,13 @@ def curator_pre_tool_call_hook(
             "ts": datetime.now(timezone.utc).isoformat(),
             "hook": "pre_tool_call",
             "verdict": "approve_needed",
-            "tool": function_name,
+            "tool": tool_name,
             "action": action,
             "name": target_str,
             "retention_ratio": round(ratio, 3),
             "preserved": preserved,
             "missing": missing,
-            "args": _scrub_args(function_args),
+            "args": _scrub_args(args),
             "tool_call_id": tool_call_id,
             "session_id": session_id,
             "message": message,
@@ -550,13 +575,13 @@ def curator_pre_tool_call_hook(
         "ts": datetime.now(timezone.utc).isoformat(),
         "hook": "pre_tool_call",
         "verdict": "allow",
-        "tool": function_name,
+        "tool": tool_name,
         "action": action,
         "name": target_str,
         "retention_ratio": round(ratio, 3),
         "preserved": preserved,
         "missing": missing,
-        "args": _scrub_args(function_args),
+        "args": _scrub_args(args),
         "tool_call_id": tool_call_id,
         "session_id": session_id,
     })
@@ -662,8 +687,8 @@ def _extract_merged_skills(args: Dict[str, Any]) -> List[str]:
 
 def curator_post_tool_call_hook(
     *,
-    function_name: str,
-    function_args: Optional[Dict[str, Any]] = None,
+    tool_name: str = "",
+    args: Optional[Dict[str, Any]] = None,
     result: Any = None,
     task_id: str = "",
     session_id: str = "",
@@ -680,20 +705,25 @@ def curator_post_tool_call_hook(
     """Post-tool-call hook: write the actual execution result to the
     audit log. The pre-hook records the decision rule + verdict; this
     one records what actually happened (status / duration / error).
+
+    Parameter names mirror the Hermes invoke_hook contract: ``tool_name``
+    and ``args`` (not ``function_name`` / ``function_args``). See
+    ``model_tools.py::_emit_post_tool_call_hook`` and
+    ``hermes_cli/plugins.py:invoke_hook("post_tool_call", ...)``.
     """
     state = _state()
     if state is None:
         return
-    if function_name != "skill_manage":
+    if tool_name != "skill_manage":
         return
 
-    args = function_args or {}
+    tool_args = args or {}
     _write_audit({
         "ts": datetime.now(timezone.utc).isoformat(),
         "hook": "post_tool_call",
-        "tool": function_name,
-        "action": args.get("action"),
-        "name": args.get("name"),
+        "tool": tool_name,
+        "action": tool_args.get("action"),
+        "name": tool_args.get("name"),
         "tool_call_id": tool_call_id,
         "session_id": session_id,
         "duration_ms": duration_ms,

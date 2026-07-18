@@ -106,8 +106,8 @@ def _show_audit_tail(log_path: Path, n: int = 6) -> None:
         ts = rec.get("ts", "")[:19]
         hook = rec.get("hook", "?")
         verdict = rec.get("verdict", rec.get("status", "?"))
-        name = rec.get("name", "-")
-        action = rec.get("action", "-")
+        name = rec.get("name") or "-"
+        action = rec.get("action") or "-"
         ratio = rec.get("retention_ratio")
         ratio_s = f"  retention={ratio:.0%}" if isinstance(ratio, (int, float)) else ""
         print(f"    {ts}  {hook:14s}  {verdict:18s}  {action:10s}  {name}{ratio_s}")
@@ -146,15 +146,15 @@ def scenario_dry_run_blocks(audit_log: Path) -> None:
     ]
     for label, args in cases:
         verdict = curator_hooks.curator_pre_tool_call_hook(
-            function_name="skill_manage",
-            function_args=args,
+            tool_name="skill_manage",
+            args=args,
             tool_call_id=f"tc_{label}",
         )
         _show_verdict(label, verdict)
         # Simulate the post-hook firing after the (blocked) tool result
         curator_hooks.curator_post_tool_call_hook(
-            function_name="skill_manage",
-            function_args=args,
+            tool_name="skill_manage",
+            args=args,
             result='{"error": "blocked by curator-guard"}',
             tool_call_id=f"tc_{label}",
             duration_ms=0,
@@ -181,8 +181,8 @@ def scenario_real_approval(audit_log: Path) -> None:
         ),
     }
     verdict = curator_hooks.curator_pre_tool_call_hook(
-        function_name="skill_manage",
-        function_args=bad_patch_args,
+        tool_name="skill_manage",
+        args=bad_patch_args,
         tool_call_id="tc_bad_patch",
     )
     _show_verdict("bad patch (lost keywords)", verdict)
@@ -203,8 +203,8 @@ def scenario_real_approval(audit_log: Path) -> None:
         ),
     }
     verdict = curator_hooks.curator_pre_tool_call_hook(
-        function_name="skill_manage",
-        function_args=good_patch_args,
+        tool_name="skill_manage",
+        args=good_patch_args,
         tool_call_id="tc_good_patch",
     )
     _show_verdict("good patch (preserved keywords)", verdict)
@@ -212,16 +212,16 @@ def scenario_real_approval(audit_log: Path) -> None:
     # Case C: skill_manage view action — should pass through
     view_args = {"action": "view", "name": "pr-triage-salvage"}
     verdict = curator_hooks.curator_pre_tool_call_hook(
-        function_name="skill_manage",
-        function_args=view_args,
+        tool_name="skill_manage",
+        args=view_args,
         tool_call_id="tc_view",
     )
     _show_verdict("view (non-mutating)", verdict)
 
     # Case D: completely unrelated tool — should pass through
     verdict = curator_hooks.curator_pre_tool_call_hook(
-        function_name="terminal",
-        function_args={"command": "ls -la"},
+        tool_name="terminal",
+        args={"command": "ls -la"},
         tool_call_id="tc_terminal",
     )
     _show_verdict("terminal (unrelated tool)", verdict)
@@ -256,8 +256,8 @@ def scenario_chinese_keyword(audit_log: Path, skills_root: Path) -> None:
         "file_content": "# 完全不相关的内容\n这是关于机器学习入门的笔记。\n",
     }
     verdict = curator_hooks.curator_pre_tool_call_hook(
-        function_name="skill_manage",
-        function_args=bad,
+        tool_name="skill_manage",
+        args=bad,
         tool_call_id="tc_zh_bad",
     )
     _show_verdict("Chinese bad patch (lost 调性 BPM 情感)", verdict)
@@ -272,8 +272,8 @@ def scenario_chinese_keyword(audit_log: Path, skills_root: Path) -> None:
         ),
     }
     verdict = curator_hooks.curator_pre_tool_call_hook(
-        function_name="skill_manage",
-        function_args=good,
+        tool_name="skill_manage",
+        args=good,
         tool_call_id="tc_zh_good",
     )
     _show_verdict("Chinese good patch (preserved 调性 BPM 情感)", verdict)
@@ -286,8 +286,8 @@ def scenario_outside_curator() -> None:
     _hr("Scenario 4: hooks are NO-OP outside curator context")
     # Don't enter curator context — hooks should pass through everything
     verdict = curator_hooks.curator_pre_tool_call_hook(
-        function_name="skill_manage",
-        function_args={
+        tool_name="skill_manage",
+        args={
             "action": "delete",
             "name": "anything",
         },
@@ -336,11 +336,12 @@ def main() -> int:
         if audit_log.exists():
             for line in audit_log.read_text(encoding="utf-8").splitlines():
                 rec = json.loads(line)
+                name = rec.get("name") or "-"
                 print(f"  {rec.get('ts','')[:19]}  "
                       f"{rec.get('hook',''):14s}  "
                       f"{(rec.get('verdict') or rec.get('status','')):18s}  "
                       f"{(rec.get('action') or '-'):10s}  "
-                      f"{rec.get('name', '-')}")
+                      f"{name}")
     return 0
 
 
