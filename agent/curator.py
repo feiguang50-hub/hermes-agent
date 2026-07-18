@@ -1674,7 +1674,7 @@ def run_curator_review(
                     )
                 else:
                     prompt = f"{CURATOR_REVIEW_PROMPT}{builtins_note}\n\n{candidate_list}"
-                llm_meta = _run_llm_review(prompt)
+                llm_meta = _run_llm_review(prompt, dry_run=dry_run)
                 final_summary = (
                     f"{prefix}{auto_summary}; llm: {llm_meta.get('summary', 'no change')}"
                 )
@@ -1822,7 +1822,7 @@ def _resolve_review_model(cfg: Dict[str, Any]) -> tuple[str, str]:
     return b.provider, b.model
 
 
-def _run_llm_review(prompt: str) -> Dict[str, Any]:
+def _run_llm_review(prompt: str, *, dry_run: bool = False) -> Dict[str, Any]:
     """Spawn an AIAgent fork to run the curator review prompt.
 
     Returns a dict with:
@@ -1833,9 +1833,34 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
         the pass (arguments may be truncated for readability)
       - error: set if the pass failed mid-run; final/summary may still be empty
 
+    *dry_run* enables the curator pre-tool-call hook's hard-block mode
+    (in addition to the prompt banner) so a misbehaving LLM that calls
+    a mutating skill_manage under dry-run is stopped at the hook layer.
+    The post-tool-call audit log records every call's verdict either way.
+
     Never raises; callers get a structured failure instead.
     """
     import contextlib
+    from agent import curator_hooks
+
+    # Bind curator hook context for the duration of this LLM pass. The
+    # hooks check thread-local state (set by enter_curator_context) so
+    # they only fire while this review is running — other agents using
+    # the same hook system are unaffected.
+    audit_log = (
+        get_hermes_home() / "logs" / "curator" / "audit.jsonl"
+    )
+    hooks_active = False
+    try:
+        curator_hooks.register_curator_hooks()
+        curator_hooks.enter_curator_context(
+            dry_run=dry_run,
+            audit_log_path=audit_log,
+        )
+        hooks_active = True
+    except Exception as _hook_init_err:
+        logger.debug("curator hook init failed: %s", _hook_init_err)
+
     result_meta: Dict[str, Any] = {
         "final": "",
         "summary": "",
@@ -1954,6 +1979,14 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
              contextlib.redirect_stderr(_devnull):
             conv_result = review_agent.run_conversation(user_message=prompt)
 
+        # Always release the hook context — even on tool errors — so the
+        # audit file handle closes and thread-local state clears.
+        if hooks_active:
+            try:
+                curator_hooks.exit_curator_context()
+            except Exception as _hook_exit_err:
+                logger.debug("curator hook exit failed: %s", _hook_exit_err)
+
         final = ""
         if isinstance(conv_result, dict):
             final = str(conv_result.get("final_response") or "").strip()
@@ -1986,6 +2019,18 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
         if review_agent is not None:
             try:
                 review_agent.close()
+            except Exception:
+                pass
+        # Hook context must be torn down even on exception so the audit
+        # handle closes and the global hook list doesn't keep growing
+        # across reentrant curator runs.
+        if hooks_active:
+            try:
+                curator_hooks.exit_curator_context()
+            except Exception:
+                pass
+            try:
+                curator_hooks.unregister_curator_hooks()
             except Exception:
                 pass
     return result_meta
