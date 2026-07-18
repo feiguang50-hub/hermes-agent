@@ -1440,6 +1440,23 @@ def _skill_should_show(
     return True
 
 
+def _skill_state(skill_name: str) -> Optional[str]:
+    """Return the recorded lifecycle ``state`` for *skill_name*, or None.
+
+    Reads the usage sidecar if present; returns None for skills that
+    have no record (treated as ``active`` by routing callers). Cheap —
+    one file read, no LLM involvement. Used by the skills-index build
+    to hide ``split`` / ``deprecated`` skills from default routing.
+    """
+    if not skill_name:
+        return None
+    try:
+        from tools.skill_usage import get_record
+        return get_record(skill_name).get("state")
+    except Exception:
+        return None
+
+
 def _current_session_platform_hint() -> str:
     """Return the active platform without importing the gateway package on CLI startup."""
     platform = os.environ.get("HERMES_PLATFORM") or os.environ.get("HERMES_SESSION_PLATFORM")
@@ -1526,6 +1543,11 @@ def build_skills_system_prompt(
                 continue
             if frontmatter_name in disabled or skill_name in disabled:
                 continue
+            # Lifecycle filter — same as the cold path below. The
+            # snapshot stores frontmatter, not state, so we read the
+            # sidecar each call. Cheap: one file read per snapshot hit.
+            if _skill_state(skill_name) in ("split", "deprecated"):
+                continue
             if not _skill_should_show(
                 entry.get("conditions") or {},
                 available_tools,
@@ -1556,6 +1578,13 @@ def build_skills_system_prompt(
                 available_tools,
                 available_toolsets,
             ):
+                continue
+            # Hide lifecycle-deprecated and split skills from the default
+            # routing index. The file stays on disk (URLs still resolve via
+            # skill_view), but the LLM shouldn't be told to load them.
+            # skill_manager_tool clears the snapshot cache on every state
+            # mutation so the next cold build sees the up-to-date state.
+            if _skill_state(skill_name) in ("split", "deprecated"):
                 continue
             skills_by_category.setdefault(entry["category"], []).append(
                 (entry["frontmatter_name"], entry["description"])

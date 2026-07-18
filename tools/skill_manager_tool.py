@@ -1331,9 +1331,22 @@ def skill_manage(
     new_string: str = None,
     replace_all: bool = False,
     absorbed_into: str = None,
+    split_into: list = None,
+    replaced_by: str = None,
 ) -> str:
     """
     Manage user-created skills. Dispatches to the appropriate action handler.
+
+    New lifecycle actions:
+
+    * ``split``     — mark *name* as decomposed into the skills listed in
+      ``split_into`` (list of strings). The original SKILL.md stays on
+      disk so the URL still resolves, but the skill is excluded from
+      routing. Pair this with ``action="create"`` calls for each
+      replacement before recording the split.
+    * ``deprecate`` — mark *name* as superseded by ``replaced_by``
+      (single skill name). Same on-disk behavior as ``split``; the
+      routing layer surfaces a pointer to the replacement instead.
 
     Returns JSON string with results.
     """
@@ -1386,8 +1399,61 @@ def skill_manage(
             return tool_error("file_path is required for 'remove_file'.", success=False)
         result = _remove_file(name, file_path)
 
+    elif action == "split":
+        # Mark the source skill as decomposed. The replacement skills must
+        # already exist on disk (or be created in the same call batch by
+        # the caller) — split is a metadata operation, not a file split.
+        if not split_into:
+            return tool_error(
+                "split_into is required for 'split'. Provide a non-empty "
+                "list of replacement skill names.",
+                success=False,
+            )
+        if not isinstance(split_into, list) or not all(
+            isinstance(n, str) and n.strip() for n in split_into
+        ):
+            return tool_error(
+                "split_into must be a list of non-empty strings.",
+                success=False,
+            )
+        try:
+            from tools.skill_usage import record_split_into, set_state, STATE_SPLIT
+            set_state(name, STATE_SPLIT)
+            record_split_into(name, list(split_into))
+        except Exception as e:
+            return tool_error(f"split failed: {e}", success=False)
+        result = {
+            "success": True,
+            "action": "split",
+            "name": name,
+            "split_into": list(split_into),
+        }
+
+    elif action == "deprecate":
+        # Mark the source skill as superseded. replaced_by is optional but
+        # strongly recommended — without it routing can't surface a pointer
+        # to the alternative.
+        if not isinstance(replaced_by, str) or not replaced_by.strip():
+            return tool_error(
+                "replaced_by is required for 'deprecate'. Provide the name "
+                "of the skill that supersedes this one.",
+                success=False,
+            )
+        try:
+            from tools.skill_usage import record_replaced_by, set_state, STATE_DEPRECATED
+            set_state(name, STATE_DEPRECATED)
+            record_replaced_by(name, replaced_by.strip())
+        except Exception as e:
+            return tool_error(f"deprecate failed: {e}", success=False)
+        result = {
+            "success": True,
+            "action": "deprecate",
+            "name": name,
+            "replaced_by": replaced_by.strip(),
+        }
+
     else:
-        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file"}
+        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file, split, deprecate"}
 
     if result.get("success"):
         try:

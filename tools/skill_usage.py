@@ -54,7 +54,22 @@ except ImportError:  # pragma: no cover - platform-specific fallback
 STATE_ACTIVE = "active"
 STATE_STALE = "stale"
 STATE_ARCHIVED = "archived"
-_VALID_STATES = {STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED}
+# A skill marked "split" has been broken into multiple narrower skills; the
+# original SKILL.md is preserved (so the URL / name still resolves) but the
+# routing layer treats split skills as deprecated. Curator sets this when it
+# detects the skill covers two unrelated domains that deserve separate
+# SKILL.md files.
+STATE_SPLIT = "split"
+# A skill marked "deprecated" is intentionally superseded by something
+# else — a better-named umbrella, a newer skill, or a deleted upstream.
+# Kept on disk so existing URLs don't break, but routing surfaces a
+# pointer to the replacement. Distinct from "archived" (which means
+# "idle / forgotten") and from "split" (which means "decomposed").
+STATE_DEPRECATED = "deprecated"
+_VALID_STATES = {
+    STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED,
+    STATE_SPLIT, STATE_DEPRECATED,
+}
 
 # Task A: outcome + user_feedback vocabulary.
 #
@@ -724,16 +739,85 @@ def mark_agent_created(skill_name: str) -> None:
 
 def set_state(skill_name: str, state: str) -> None:
     """Set lifecycle state. No-op if *state* is invalid or the skill isn't
-    curator-manageable (hub skills, or built-ins with pruning disabled)."""
+    curator-manageable (hub skills, or built-ins with pruning disabled).
+
+    State semantics:
+
+    * ``active`` — default; visible in routing.
+    * ``stale`` — inactivity exceeded ``stale_after_days``; still visible
+      in routing but flagged for curator attention.
+    * ``archived`` — moved to ``.archive/``; original SKILL.md is
+      preserved on disk so URLs still resolve; not in routing.
+    * ``split`` — curator detected the skill covers multiple unrelated
+      domains and decomposed it into narrower skills; original SKILL.md
+      is preserved as a stub pointing at the replacements (URL still
+      resolves) but the skill is excluded from routing.
+    * ``deprecated`` — explicitly superseded; routing surfaces a
+      pointer to the replacement (see ``replaced_by``) but the file
+      stays on disk for back-compat.
+
+    ``archived_at`` records the timestamp for archived / split /
+    deprecated transitions. Active restores null out the field so
+    reads can distinguish "never archived" from "reactivated after
+    archive".
+    """
     if state not in _VALID_STATES:
         logger.debug("set_state: invalid state %r for %s", state, skill_name)
         return
     def _apply(rec: Dict[str, Any]) -> None:
         rec["state"] = state
-        if state == STATE_ARCHIVED:
+        if state in (STATE_ARCHIVED, STATE_SPLIT, STATE_DEPRECATED):
             rec["archived_at"] = _now_iso()
         elif state == STATE_ACTIVE:
             rec["archived_at"] = None
+    _mutate(skill_name, _apply, require_curation_eligible=True)
+
+
+def record_split_into(skill_name: str, replacement_names: List[str]) -> None:
+    """Record which skills replaced *skill_name* when it was decomposed.
+
+    Stored as ``split_into: [list]`` on the usage record so the
+    routing layer (and human readers) can find the replacements.
+    Idempotent — replaces the prior list. No-op when called on a
+    skill the curator doesn't manage.
+    """
+    if not skill_name or not replacement_names:
+        return
+    # Drop empties and dedupe, preserving order.
+    seen: Set[str] = set()
+    cleaned: List[str] = []
+    for n in replacement_names:
+        if not isinstance(n, str):
+            continue
+        n = n.strip()
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        cleaned.append(n)
+    if not cleaned:
+        return
+
+    def _apply(rec: Dict[str, Any]) -> None:
+        rec["split_into"] = list(cleaned)
+
+    _mutate(skill_name, _apply, require_curation_eligible=True)
+
+
+def record_replaced_by(skill_name: str, replacement_name: str) -> None:
+    """Record the single skill that supersedes *skill_name*. Used when a
+    skill is deprecated in favor of one specific replacement (rather
+    than decomposed into several). Stored as ``replaced_by`` on the
+    usage record.
+    """
+    if not skill_name or not replacement_name or not isinstance(replacement_name, str):
+        return
+    replacement_name = replacement_name.strip()
+    if not replacement_name:
+        return
+
+    def _apply(rec: Dict[str, Any]) -> None:
+        rec["replaced_by"] = replacement_name
+
     _mutate(skill_name, _apply, require_curation_eligible=True)
 
 
