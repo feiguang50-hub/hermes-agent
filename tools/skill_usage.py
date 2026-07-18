@@ -55,6 +55,39 @@ STATE_STALE = "stale"
 STATE_ARCHIVED = "archived"
 _VALID_STATES = {STATE_ACTIVE, STATE_STALE, STATE_ARCHIVED}
 
+# Task A: outcome + user_feedback vocabulary.
+#
+# ``outcome`` captures how the skill invocation actually went — derived from
+# tool return values (heuristic), user corrections, or explicit rating. The
+# curator + scoring functions read these counters to derive success-rate and
+# other quality signals. Old records without these keys are backfilled by
+# ``get_record`` so the schema is forward-compatible.
+OUTCOME_SUCCESS = "success"      # tool returned without error; agent continued
+OUTCOME_FAILURE = "failure"      # tool raised / returned an error result
+OUTCOME_CORRECTED = "corrected"  # user redid or overrode the result
+OUTCOME_ABANDONED = "abandoned"  # user stopped mid-task without finishing
+OUTCOME_UNKNOWN = "unknown"      # no signal collected yet
+_VALID_OUTCOMES = frozenset({
+    OUTCOME_SUCCESS, OUTCOME_FAILURE, OUTCOME_CORRECTED,
+    OUTCOME_ABANDONED, OUTCOME_UNKNOWN,
+})
+
+OUTCOME_SOURCE_AUTO = "auto"          # detected from tool return value
+OUTCOME_SOURCE_USER = "user"          # explicit user feedback
+OUTCOME_SOURCE_HEURISTIC = "heuristic"  # inferred from conversation pattern
+_VALID_OUTCOME_SOURCES = frozenset({
+    OUTCOME_SOURCE_AUTO, OUTCOME_SOURCE_USER, OUTCOME_SOURCE_HEURISTIC,
+})
+
+FEEDBACK_UP = "up"
+FEEDBACK_DOWN = "down"
+_VALID_FEEDBACK = frozenset({FEEDBACK_UP, FEEDBACK_DOWN})
+
+# Cap on how many free-text feedback notes we retain per skill. The schema
+# stays small (handful of strings), avoiding unbounded growth if a skill is
+# heavily used and gets frequent notes.
+_MAX_FEEDBACK_NOTES = 5
+
 # Load-bearing bundled built-ins the curator must NEVER archive or consolidate,
 # regardless of ``curator.prune_builtins``, pin state, or LLM judgment. These
 # back advertised UX paths (e.g. ``plan`` powers the ``/plan`` slash-command
@@ -494,6 +527,25 @@ def _empty_record() -> Dict[str, Any]:
         "state": STATE_ACTIVE,
         "pinned": False,
         "archived_at": None,
+        # Task A: outcome + user feedback counters. See module docstring
+        # for the rating vocabulary. Scores derive from these.
+        "outcomes": {
+            OUTCOME_SUCCESS: 0,
+            OUTCOME_FAILURE: 0,
+            OUTCOME_CORRECTED: 0,
+            OUTCOME_ABANDONED: 0,
+            OUTCOME_UNKNOWN: 0,
+            "last_outcome": None,
+            "last_outcome_at": None,
+            "last_outcome_source": None,
+        },
+        "user_feedback": {
+            FEEDBACK_UP: 0,
+            FEEDBACK_DOWN: 0,
+            "last_rating": None,
+            "last_rating_at": None,
+            "notes": [],  # most-recent-first, capped at _MAX_FEEDBACK_NOTES
+        },
     }
 
 
@@ -687,6 +739,85 @@ def forget(skill_name: str) -> None:
                 save_usage(data)
     except Exception as e:
         logger.debug("skill_usage.forget(%s) failed: %s", skill_name, e, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Task A: outcome + user_feedback recorders
+# ---------------------------------------------------------------------------
+#
+# Both functions are best-effort and operate on ALL skills (built-ins and
+# hub-installed included) because outcome is pure observability, not a
+# curation signal. Counter bumps are atomic via _mutate / file lock.
+
+def record_outcome(
+    skill_name: str,
+    outcome: str,
+    source: str = OUTCOME_SOURCE_HEURISTIC,
+) -> None:
+    """Record a per-invocation outcome for *skill_name*.
+
+    Increments ``outcomes[outcome]`` and refreshes the ``last_outcome`` /
+    ``last_outcome_at`` / ``last_outcome_source`` triplet. No-op on invalid
+    outcome / source — those are logged at DEBUG so callers can pass through
+    arbitrary strings without crashing the agent loop.
+    """
+    if not skill_name or outcome not in _VALID_OUTCOMES:
+        logger.debug(
+            "record_outcome(%s, %r) skipped: invalid outcome", skill_name, outcome,
+        )
+        return
+    if source not in _VALID_OUTCOME_SOURCES:
+        logger.debug(
+            "record_outcome(%s, source=%r) falling back to heuristic",
+            skill_name, source,
+        )
+        source = OUTCOME_SOURCE_HEURISTIC
+
+    def _apply(rec: Dict[str, Any]) -> None:
+        outcomes = rec.setdefault("outcomes", {})
+        # Backfill any missing outcome counters (forward compat).
+        for k in _VALID_OUTCOMES:
+            outcomes.setdefault(k, 0)
+        outcomes[outcome] = int(outcomes.get(outcome) or 0) + 1
+        outcomes["last_outcome"] = outcome
+        outcomes["last_outcome_at"] = _now_iso()
+        outcomes["last_outcome_source"] = source
+
+    _mutate(skill_name, _apply)
+
+
+def record_user_feedback(
+    skill_name: str,
+    rating: str,
+    text: Optional[str] = None,
+) -> None:
+    """Record an explicit thumbs-up/down from the user, with optional note.
+
+    ``rating`` must be ``FEEDBACK_UP`` / ``FEEDBACK_DOWN``; invalid ratings
+    are logged and dropped. ``text`` is added (most-recent-first) to the
+    ``notes`` list, capped at ``_MAX_FEEDBACK_NOTES``.
+    """
+    if not skill_name or rating not in _VALID_FEEDBACK:
+        logger.debug(
+            "record_user_feedback(%s, %r) skipped: invalid rating", skill_name, rating,
+        )
+        return
+
+    def _apply(rec: Dict[str, Any]) -> None:
+        fb = rec.setdefault("user_feedback", {})
+        fb.setdefault(FEEDBACK_UP, 0)
+        fb.setdefault(FEEDBACK_DOWN, 0)
+        fb[rating] = int(fb.get(rating) or 0) + 1
+        fb["last_rating"] = rating
+        fb["last_rating_at"] = _now_iso()
+        if isinstance(text, str) and text.strip():
+            notes = fb.setdefault("notes", [])
+            notes.insert(0, text.strip())
+            # Cap retention
+            if len(notes) > _MAX_FEEDBACK_NOTES:
+                fb["notes"] = notes[:_MAX_FEEDBACK_NOTES]
+
+    _mutate(skill_name, _apply)
 
 
 # ---------------------------------------------------------------------------
