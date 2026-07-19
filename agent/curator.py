@@ -596,16 +596,16 @@ CURATOR_REVIEW_PROMPT = (
     "is NOT a reason to keep — it's a reason to move it under an "
     "umbrella as a subsection or support file.\n\n"
     "Quality grounding — not optional:\n"
-    "Before splitting, deprecating, or archiving any skill, consult "
-    "tools.skill_usage.get_record(name) and "
-    "agent.skill_scoring.compute_skill_score(name) to confirm the "
-    "skill is actually underperforming — not just unused. A skill "
-    "with no use_count may still have a recent success score and "
-    "recent positive user feedback; that is NOT a split / deprecate "
-    "candidate. Conversely, a skill with a low score component "
-    "(success_rate below 0.5, or feedback_score below 0.5 with a "
-    "reasonable sample size) is a strong candidate even if its "
-    "use_count is non-zero. Quality signal > counter signal.\n\n"
+    "Each candidate row in the list below carries a `quality=` score "
+    "(0-1, blended from success_rate + feedback) plus `ok=success/resolved` "
+    "and `fb=thumbs up/down` tallies. The review LLM has no tool to call "
+    "compute_skill_score; this inline signal is the only quality data you "
+    "will see. Before splitting, deprecating, or archiving any skill, "
+    "read those columns: a skill with no use_count may still have a high "
+    "quality and positive feedback — that is NOT a split / deprecate "
+    "candidate. Conversely, a skill with `quality < 0.5` (or poor "
+    "success/feedback with a real sample) is a strong candidate even if "
+    "its use_count is non-zero. Quality signal > counter signal.\n\n"
     "Expected output: umbrella-ification where it measurably improves "
     "discoverability and reduces overlap. A short pass with two clean "
     "merges and twenty well-targeted keeps is preferable to a sweeping "
@@ -1916,22 +1916,41 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 def _render_candidate_list() -> str:
-    """Human/agent-readable list of agent-created skills with usage stats."""
+    """Human/agent-readable list of agent-created skills with usage stats AND
+    quality signal. The quality columns (quality score + outcome tally +
+    feedback) are the ONLY way the review LLM can see the scoring signal — it
+    has no tool to call compute_skill_score itself, so we inline it here."""
     rows = skill_usage.agent_created_report()
     if not rows:
         return "No agent-created skills to review."
     cron_referenced = _cron_referenced_skills()
-    lines = [f"Agent-created skills ({len(rows)}):\n"]
+    lines = [
+        f"Agent-created skills ({len(rows)}):",
+        "(quality=0-1 blended score; ok=success/resolved outcomes; "
+        "fb=thumbs up/down. Low quality (<0.5) or poor success/feedback "
+        "with a real sample = a strong split/deprecate/archive signal.)\n",
+    ]
     for r in rows:
+        oc = r.get("outcomes") or {}
+        fb = r.get("user_feedback") or {}
+        succ = int(oc.get("success") or 0)
+        fail = int(oc.get("failure") or 0)
+        up = int(fb.get("up") or 0)
+        down = int(fb.get("down") or 0)
+        try:
+            score = skill_scoring.compute_skill_score(r["name"]).get("score")
+            score_str = f"{score:.2f}" if isinstance(score, (int, float)) else "n/a"
+        except Exception:
+            score_str = "n/a"
         lines.append(
             f"- {r['name']}  "
             f"state={r['state']}  "
             f"pinned={'yes' if r.get('pinned') else 'no'}  "
             f"cron={'yes' if r['name'] in cron_referenced else 'no'}  "
-            f"activity={r.get('activity_count', 0)}  "
             f"use={r.get('use_count', 0)}  "
-            f"view={r.get('view_count', 0)}  "
-            f"patches={r.get('patch_count', 0)}  "
+            f"quality={score_str}  "
+            f"ok={succ}/{succ + fail}  "
+            f"fb={up}/{down}  "
             f"last_activity={r.get('last_activity_at') or 'never'}"
         )
     return "\n".join(lines)

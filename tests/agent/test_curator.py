@@ -1027,15 +1027,27 @@ def test_curator_review_prompt_prefers_deprecate_over_consolidate():
     assert "Three ways to consolidate" not in CURATOR_REVIEW_PROMPT
 
 
-def test_curator_review_prompt_consults_quality_score():
-    """Curator must ground split/deprecate decisions in compute_skill_score,
-    not raw counters. Mirrors PROJECT_STATUS.md section E (curator prompt
-    rebalance) and is the second half of section C's scoring-aware
-    paragraph.
-    """
-    from agent.curator import CURATOR_REVIEW_PROMPT
-    assert "compute_skill_score" in CURATOR_REVIEW_PROMPT
-    assert "get_record" in CURATOR_REVIEW_PROMPT
+def test_curator_review_prompt_consults_quality_score(curator_env):
+    """Curator must ground split/deprecate decisions in the QUALITY SIGNAL,
+    not raw counters. The score is now inlined into the candidate list (the
+    review LLM has no tool to call compute_skill_score), so this pins both
+    that the prompt directs the LLM to the inline `quality=` column and
+    that the column is actually rendered into the candidate list."""
+    c = curator_env["curator"]
+    u = curator_env["usage"]
+    skills_dir = curator_env["home"] / "skills"
+    _write_skill(skills_dir, "a")
+    u.mark_agent_created("a")
+
+    from agent.curator import CURATOR_REVIEW_PROMPT, _render_candidate_list
+    assert "quality=" in CURATOR_REVIEW_PROMPT
+    assert "compute_skill_score" in CURATOR_REVIEW_PROMPT  # symbol name appears in the inline-method note
+    rendered = _render_candidate_list()
+    # The rendered candidate list must surface the quality signal so the LLM
+    # can see it (this is the OUTPUT end of the scoring-driven loop).
+    assert "quality=" in rendered
+    assert "ok=" in rendered
+    assert "fb=" in rendered
 
 
 
