@@ -1500,7 +1500,7 @@ SKILL_MANAGE_SCHEMA = {
         "Actions: create (full SKILL.md + optional category), "
         "patch (old_string/new_string — preferred for fixes), "
         "edit (full SKILL.md rewrite — major overhauls only), "
-        "delete, write_file, remove_file.\n\n"
+        "delete, write_file, remove_file, split, deprecate.\n\n"
         "On delete, pass `absorbed_into=<umbrella>` when you're merging this "
         "skill's content into another one, or `absorbed_into=\"\"` when you're "
         "pruning it with no forwarding target. This lets the curator tell "
@@ -1508,6 +1508,17 @@ SKILL_MANAGE_SCHEMA = {
         "(cron jobs that reference the old skill name, etc.) get updated "
         "correctly. The target you name in `absorbed_into` must already "
         "exist — create/patch the umbrella first, then delete.\n\n"
+        "Lifecycle actions — prefer these over `delete` when the content is "
+        "still useful:\n"
+        "* `split` — the skill covers two unrelated domains. Pass "
+        "`split_into=[<replacement-1>, <replacement-2>, ...]` (list of "
+        "non-empty skill names). The original stays on disk (so the URL "
+        "still resolves) but is hidden from routing. Create the replacements "
+        "first (separate `create` calls), then call `split` to record the "
+        "decomposition.\n"
+        "* `deprecate` — the skill is superseded by a better-named umbrella. "
+        "Pass `replaced_by=<umbrella-skill-name>`. Same on-disk behavior as "
+        "`split`: the file stays, routing surfaces a pointer to the replacement.\n\n"
         "Create when: complex task succeeded (5+ calls), errors overcome, "
         "user-corrected approach worked, non-trivial workflow discovered, "
         "or user asks you to remember a procedure.\n"
@@ -1528,7 +1539,7 @@ SKILL_MANAGE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"],
+                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file", "split", "deprecate"],
                 "description": "The action to perform."
             },
             "name": {
@@ -1600,6 +1611,28 @@ SKILL_MANAGE_SCHEMA = {
                     "rewriting) will have to guess at intent."
                 )
             },
+            "split_into": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "For 'split' only — list of replacement skill names the "
+                    "original is being decomposed into. Each entry must be a "
+                    "non-empty string. Create the replacements first (separate "
+                    "`create` calls), then call `split` to record the "
+                    "decomposition. The original SKILL.md stays on disk so the "
+                    "URL still resolves, but the skill is hidden from routing."
+                )
+            },
+            "replaced_by": {
+                "type": "string",
+                "description": (
+                    "For 'deprecate' only — name of the umbrella skill that "
+                    "supersedes this one. Required and must be a non-empty "
+                    "string. The original SKILL.md stays on disk so the URL "
+                    "still resolves; routing surfaces a pointer to the "
+                    "replacement instead."
+                )
+            },
         },
         "required": ["action", "name"],
     },
@@ -1623,6 +1656,8 @@ registry.register(
         old_string=args.get("old_string"),
         new_string=args.get("new_string"),
         replace_all=args.get("replace_all", False),
-        absorbed_into=args.get("absorbed_into")),
+        absorbed_into=args.get("absorbed_into"),
+        split_into=args.get("split_into"),
+        replaced_by=args.get("replaced_by")),
     emoji="📝",
 )
