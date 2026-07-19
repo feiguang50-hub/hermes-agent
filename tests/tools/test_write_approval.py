@@ -211,6 +211,27 @@ def test_skill_gate_on_then_apply_writes_file(hermes_home):
     assert smt._find_skill("applied-skill") is not None
 
 
+def test_apply_skill_pending_forwards_split_and_deprecate_args(hermes_home, monkeypatch):
+    """R15: the staged-replay path must forward split_into / replaced_by. If it
+    drops them, a replayed split/deprecate fails with 'split_into is required' /
+    'replaced_by is required'. Capture the forwarded kwargs directly."""
+    import tools.skill_manager_tool as smt
+    captured = {}
+
+    def _capture(**kwargs):
+        captured.update(kwargs)
+        return json.dumps({"success": True})
+
+    monkeypatch.setattr(smt, "skill_manage", _capture)
+
+    smt.apply_skill_pending({
+        "action": "split", "name": "x",
+        "split_into": ["a-skill", "b-skill"], "replaced_by": "umbrella",
+    })
+    assert captured.get("split_into") == ["a-skill", "b-skill"]
+    assert captured.get("replaced_by") == "umbrella"
+
+
 def test_skill_create_diff_is_full_content(hermes_home):
     from tools.skill_manager_tool import skill_manage
     from tools import write_approval as wa

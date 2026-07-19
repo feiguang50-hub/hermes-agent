@@ -1315,6 +1315,8 @@ def apply_skill_pending(payload: Dict[str, Any]) -> str:
             new_string=payload.get("new_string"),
             replace_all=payload.get("replace_all", False),
             absorbed_into=payload.get("absorbed_into"),
+            split_into=payload.get("split_into"),
+            replaced_by=payload.get("replaced_by"),
         )
     finally:
         _skill_gate_bypass.reset(token)
