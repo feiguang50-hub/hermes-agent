@@ -712,7 +712,35 @@ Branch state additions:
 | `ac2f8f0` | feat(agent/curator): put deprecate ahead of consolidate in lifecycle rubric |
 | `34b293a` | test(agent/curator): pin deprecate-ahead-of-consolidate ordering |
 | `a779001` | docs: record post-rubric real-LLM verification (deprecate-first prompt lands the designed decision on the designed fixture) |
-| *this commit* | docs: record boundary-fixtures real-LLM verification (rubric holds on no-umbrella, misroutes on 2-bullet preamble, under-acts on real-paragraph) |
+| `cd8e1a5` | docs: record boundary-fixtures real-LLM verification (rubric holds on no-umbrella, misroutes on 2-bullet preamble, under-acts on real-paragraph) |
+
+**Open follow-ups recorded 2026-07-19 (end of sixth pass).**
+
+These are deliberately **not** done in this session. They are recorded
+here so the next session has a clean handoff.
+
+1. **`--apply` verification — run against the original 5-fixture
+   designed set, *not* against any boundary fixture.** Per the
+   recommendation in the "Recommended next step" paragraph above:
+   option 1 (5 designed fixtures, LLM already gets 5/5) is the
+   right next test because it exercises the YAML → tool-call →
+   audit-log → mutate-disk path end-to-end with the *deprecate*
+   vocabulary the rubric is supposed to teach, with low on-disk
+   risk. The boundary fixtures (3 of them) are deferred for
+   `--apply` until their rubric-route failures (see follow-up #2)
+   are fixed at the prompt level first.
+
+2. **Two rubric holes exposed by Fixtures A and B — *deferred for a
+   dedicated next session, do not act on them now*.** The candidate
+   prompt edits are already documented in the per-fixture analysis
+   above (Fixture A: tighten "paragraph" to a length threshold;
+   Fixture B: tighten the "keep" qualifier and surface broken
+   cross-reference as a warning rather than a keep-justification).
+   These candidates are kept as-is in this doc; they are **not**
+   applied in this session. The user explicitly asked for them to
+   be parked here unchanged.
+
+---
 
 ---
 
