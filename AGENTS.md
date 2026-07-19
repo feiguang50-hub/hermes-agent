@@ -1423,3 +1423,72 @@ test('windowsHide defaults to true on Windows, is left alone elsewhere', () => {
 If the logic lives inline in a god-file (`main.ts`, `cli.py`,
 `gateway/run.py`) and extracting it feels disruptive: that's the actual
 signal to do the extraction, not to regex around it.
+
+---
+
+## Curator / 自我改进评估机制 (additive section, 2026-07-19)
+
+This section captures the state and hard-won lessons for the **curator
+self-improving evaluation mechanism** (split/deprecate lifecycle + quality
+scoring). When a future session touches `agent/curator.py`,
+`agent/curator_hooks.py`, `agent/skill_scoring.py`, `tools/skill_usage.py`,
+or `tools/skill_manager_tool.py`, **read `STATUS.zh.md` first** — it has
+the full known-issues list and which commits fixed what.
+
+### Where state lives
+- **`STATUS.zh.md`** — project status + known issues (P0/P1/P2). Read this
+  before any curator work; it's the single source of truth. 95 lines.
+- **`docs/CURATOR_SETUP.md`** — server-side self-check (git pull, sensor
+  self-test, locale check, dry-run walkthrough). Run after every deploy.
+- **Feedback loop is wired end-to-end**: `record_outcome` fires in
+  `agent/turn_finalizer.py` on every turn; candidate list in
+  `agent/curator.py::_render_candidate_list` inlines `quality= ok= fb=`
+  for the review LLM. **2b (synthetic) proven the chain drives decisions.**
+
+### Hard-won lessons (read these BEFORE editing)
+1. **Default to deleting, not adding.** Long sessions bloat docs/files; an
+   active choice to remove is the cure. The first 10 passes of this project
+   produced 1301 lines of `PROJECT_STATUS.md` prose that was condensed to
+   95 lines once asked.
+2. **Real production data IS the test data, not a "dirty" variant.** A
+   `record_outcome` that never ran in 6 curator passes over a real
+   library is a real bug, not a "test environment quirk." Treat export
+   data as ground truth.
+3. **Don't tell the LLM to call Python functions.** Prompt text said
+   "call `compute_skill_score(name)`" but the review fork has no tool
+   to execute Python. Inline the data into the candidate list instead
+   — every field the LLM needs must be in the prompt, not a callable.
+4. **`py_compile` is NOT a sufficient sanity check.** It passed after
+   an edit accidentally deleted `mark_agent_created` (orphaned docstring
+   + body left as dead code post-`return`). **Run the test suite**;
+   only a green pytest guards function existence, not a green compile.
+5. **Every P0 fix must have a "test that fails without it".** Strip the
+   fix, run the test, see it fail, restore the fix, see it pass. This
+   is the only test that proves the fix is the thing doing the work.
+6. **Curator background-review guard (`is_background_review()`) applies
+   to ALL curator-side telemetry, including `record_outcome` and
+   `record_turn_skill_outcomes`.** The curator's own pass must never
+   fabricate outcomes. See `tools/skill_provenance.py::set_current_write_origin`.
+7. **Cross-run LLM non-determinism on borderline cases is real** (e.g.
+   `shopping-agent` flipped between keep-all and deprecate across two
+   real dry-runs on identical data). Until rubric edges are fixed,
+   don't trust any single dry-run verdict as ground truth; run 2-3x
+   before treating an LLM decision as stable.
+8. **Don't propose renaming AI-authored commits to a human author.**
+   Code is the AI's, author should stay the AI's. Co-author trailers
+   are the honest way to add a contributor.
+9. **CJK tokenization in the keyword-retention guard is still per-char**
+   (P4 open). The path-resolution fix landed (#16); segmentation quality
+   is a future task. Don't claim the guard is "fixed" for Chinese skills —
+   it now finds the right file, but the keywords themselves are still
+   single characters.
+
+### What "wire-up is done" looks like
+After any change to the curator loop, this checklist must pass:
+- `tests/test_skill_outcome_sensor.py` (input sensor)
+- `tests/test_curator_hooks_mutating_actions.py` (R13)
+- `tests/test_curator_hooks_nested_keywords.py` (#16)
+- `tests/agent/test_curator.py::test_curator_review_prompt_consults_quality_score` (output)
+- `tests/test_skill_scoring.py::test_score_discriminates_good_bad_and_nodata` (2a)
+- `hermes curator run --dry-run --consolidate` against the real library
+  shows the inline `quality=ok=fb=` columns in REPORT.md
