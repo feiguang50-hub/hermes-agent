@@ -387,9 +387,15 @@ different decisions to make:
 | `llm-api-debugging` | keep (already the umbrella) |
 | `diagnose-cron-timeout` | keep (no siblings) |
 
-Result counts: `splits_this_run=1, deprecations_this_run=0,
-consolidated_this_run=2, pruned_this_run=0`. What the LLM
-actually decided, and what it tells us:
+Result counts (authoritative, from `run.json`): `splits_this_run=1,
+deprecations_this_run=0, consolidated_this_run=0, pruned_this_run=0`.
+(An earlier draft of this note recorded `consolidated_this_run=2`; that
+was a transcription error — the artefact `20260719-054629/run.json` and
+the fifth-pass "PRIOR" comparison column below both show `0`. The two
+provider skills WERE declared under the model's YAML `consolidations:`
+block, but `consolidated_this_run` counts *reconciled* consolidations —
+which require an actual skill removal — so those declarations did not
+increment the counter.) What the LLM actually decided, and what it tells us:
 
 1. **Split vocabulary IS being used.** `pr-triage-salvage` was
    split into `[pr-triage, pr-salvage]` in the YAML block, with
