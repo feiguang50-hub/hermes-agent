@@ -1,6 +1,6 @@
 # Curator Evaluation Mechanism — Project Status
 
-Last updated: 2026-07-18
+Last updated: 2026-07-19
 
 This document tracks the work-in-progress on the **self-improving
 evaluation / lifecycle redesign** for Hermes Agent's curator. The
@@ -719,16 +719,19 @@ Branch state additions:
 These are deliberately **not** done in this session. They are recorded
 here so the next session has a clean handoff.
 
-1. **`--apply` verification — run against the original 5-fixture
-   designed set, *not* against any boundary fixture.** Per the
-   recommendation in the "Recommended next step" paragraph above:
-   option 1 (5 designed fixtures, LLM already gets 5/5) is the
-   right next test because it exercises the YAML → tool-call →
-   audit-log → mutate-disk path end-to-end with the *deprecate*
-   vocabulary the rubric is supposed to teach, with low on-disk
-   risk. The boundary fixtures (3 of them) are deferred for
-   `--apply` until their rubric-route failures (see follow-up #2)
-   are fixed at the prompt level first.
+1. **✅ DONE (seventh pass, below) — `--apply` verification against the
+   original 5-fixture designed set.** Per the recommendation in the
+   "Recommended next step" paragraph above: option 1 (5 designed
+   fixtures, LLM already gets 5/5) is the right next test because it
+   exercises the YAML → tool-call → audit-log → mutate-disk path
+   end-to-end with the *deprecate* vocabulary the rubric is supposed
+   to teach, with low on-disk risk. **This was run on 2026-07-19 —
+   see the "Real-LLM `--apply` verification (seventh pass)" note
+   below.** Deprecate passed the full path (real tool calls → disk
+   flip → rollback); split did not fire this run and remains a known
+   gap (see follow-up #3). The boundary fixtures (3 of them) are still
+   deferred for `--apply` until their rubric-route failures (see
+   follow-up #2) are fixed at the prompt level first.
 
 2. **Two rubric holes exposed by Fixtures A and B — *deferred for a
    dedicated next session, do not act on them now*.** The candidate
@@ -739,6 +742,144 @@ here so the next session has a clean handoff.
    These candidates are kept as-is in this doc; they are **not**
    applied in this session. The user explicitly asked for them to
    be parked here unchanged.
+
+3. **`split` tool-call path still unverified — fold into the same
+   dedicated verification session as #2, do NOT chase by re-running.**
+   The seventh-pass `--apply` run deprecated the two siblings but did
+   not split `pr-triage-salvage` (split fired in the fifth/sixth
+   dry-run passes; the decision is nondeterministic). So
+   `skill_manage(action="split")` → disk has still never executed
+   against real LLM output. Re-running until it happens is
+   slot-machine verification, not a designed test — instead, design a
+   fixture + prompt setup where split is the unambiguous decision and
+   confirm the tool-call fires and `state` flips. (Split is
+   metadata-only regardless: it sets `state=split` + records
+   `split_into`; it never creates the replacement files — the model
+   must emit separate `action="create"` calls for those.)
+
+4. **Keyword-retention guard blocks legitimate umbrella-enrichment
+   patches — open optimization item (see seventh pass for detail).**
+   In the `--apply` run the model's four attempts to enrich the
+   `llm-api-debugging` umbrella were all hard-blocked by the
+   curator-guard retention gate, leaving the umbrella content-
+   incomplete after the deprecations landed. Recorded as a
+   to-optimize item, not fixed in this session.
+
+**Real-LLM `--apply` verification (2026-07-19, seventh pass — first
+non-dry-run curator pass; deprecate tool-call → disk → rollback all
+verified; split tool-call still unverified; a new guard-friction item
+recorded).**
+
+This closes out **follow-up #1** above: the `--apply` run against the
+original 5-fixture designed set. It is the **first NON-dry-run curator
+pass** in this project. Note there is no `--apply` flag — "apply" is
+simply the absence of `--dry-run`; the exact command was
+`hermes curator run --consolidate`. Same five fixtures, same model
+(`deepseek-chat` via the `deepseek` provider under `auxiliary.curator`
+in `~/.hermes/config.yaml`), 88.2 s. Raw artefacts:
+
+- `~/.hermes/logs/curator/20260719-070243/run.json`
+- `~/.hermes/logs/curator/20260719-070243/REPORT.md`
+- `~/.hermes/logs/curator/audit.jsonl` (curator session
+  `20260719_150259_96741c`)
+- Independent belt-and-suspenders pre-apply backup, taken *outside* the
+  curator's own snapshot dir:
+  `~/.hermes/.manual-preapply-backup-20260719-064904Z/`
+
+**1. Deprecate: full YAML → tool-call → audit-log → disk → rollback
+path verified end-to-end with real LLM output.** This is the first
+time the model emitted *actual* `skill_manage` tool calls rather than
+routing decisions through the YAML block only — all six prior passes
+were dry-run, where the prompt banner forbids mutations and the model
+wrote `source: "model only"`.
+
+- **audit.jsonl** shows two real deprecate tool calls that executed:
+  - `anthropic-api-debugging` — `pre_tool_call` verdict
+    `allow_no_content`, then `post_tool_call status=ok`,
+    `result_preview={"success": true, "action": "deprecate", "name":
+    "anthropic-api-debugging", "replaced_by": "llm-api-debugging"}`.
+  - `openai-api-debugging` — same shape, executed OK.
+- **run.json** records `deprecations_this_run=2`, and — crucially —
+  both entries now carry `source: "model+audit"` (the YAML
+  declaration reconciled with the tool-call audit), NOT the
+  `"model only"` of every prior pass. `splits_this_run=0`,
+  `consolidated_this_run=0`, `pruned_this_run=0`.
+- **On disk**, both siblings flipped to `state=deprecated` with
+  `replaced_by=llm-api-debugging` in `.usage.json`, and their SKILL.md
+  files stayed on disk (deprecate is a state flip + routing hide, not
+  a delete — exactly the designed behavior). `llm-api-debugging` and
+  `diagnose-cron-timeout` stayed `active`.
+- **Backup/rollback** works as designed:
+  - The auto pre-run snapshot fired: `2026-07-19T07-02-43Z` (reason
+    `pre-curator-run`) — the first entry in
+    `~/.hermes/skills/.curator_backups/`.
+  - `hermes curator rollback -y` restored all five skills to `active`
+    / `replaced_by=None`, and took its own pre-rollback safety
+    snapshot (`2026-07-19T07-06-40Z`) first, so the rollback is itself
+    undoable.
+  - The restored `.usage.json` is **byte-for-byte identical** to the
+    independent pre-apply backup.
+
+**2. Split tool-call is STILL unverified — and must not be chased by
+repeated runs.** This apply run deprecated the two siblings but did
+**not** split `pr-triage-salvage` (it split it in the fifth/sixth
+dry-run passes; the decision is nondeterministic). So the
+`skill_manage(action="split")` → disk path has still never executed
+against real LLM output. This is recorded as **follow-up #3** above:
+do not slot-machine it by re-running until it fires — design a fixture
++ prompt setup where split is the unambiguous decision, and fold it
+into the same dedicated verification session as the Fixture A/B rubric
+holes (follow-up #2). (Recall split is metadata-only regardless: even
+when it fires it only sets `state=split` + records `split_into`; it
+never creates the replacement files — the model must emit separate
+`action="create"` calls for those.)
+
+**3. NEW to-optimize item (follow-up #4) — the keyword-retention guard
+blocked legitimate umbrella-enrichment patches, leaving the umbrella
+content-incomplete.** After deprecating the two siblings, the model
+correctly tried to enrich the `llm-api-debugging` umbrella (add an
+"API key verification" section; note the deprecated siblings). All
+**four** `skill_manage(action="patch")` attempts were blocked by the
+curator-guard's keyword-retention gate:
+
+- retention ratios of 21% / 25% / 18% / 7%, all below the 50%
+  threshold;
+- one was additionally flagged "target skill NAME 'llm-api-debugging'
+  not found in patch content";
+- each was escalated to `verdict=approve_needed`, then hard-blocked in
+  `post_tool_call` because a curator run is non-interactive (no
+  user/gateway present to approve).
+
+Net effect: **the umbrella never received the merged content** — the
+deprecations landed but the consolidation they imply is only half-done
+on disk. The guard is behaving as designed (it exists to stop a
+curator from gutting a skill's body), but the retention check measures
+the *wrong thing* for an additive enrichment patch: adding a new
+section to an umbrella naturally dilutes the old-keyword ratio, so
+legitimate growth reads as destructive rewriting. The model's own
+`llm_final` narration flagged exactly this ("The curator guard plugin
+is blocking every patch attempt … body patches are being blocked with
+this keyword-retention gate"). Candidate fixes to weigh next session
+(NOT applied now):
+
+- give curator apply-runs a non-interactive approval path for the
+  curator's *own* patches (the mutations are already snapshotted and
+  rollback-able);
+- make the retention gate additive-aware — measure whether existing
+  content is *preserved* (substring/containment) rather than whether
+  the new content's keyword ratio clears a fixed floor, so appends
+  don't trip it;
+- or have the curator prefer `action="edit"` with the full merged body
+  over a series of narrow patches when enriching an umbrella.
+
+**Caveats — what this pass does and does not prove.** It proves the
+deprecate tool-call → disk → rollback chain end-to-end on this model
+and this fixture. It is a single run of a single model at default
+sampling; it does not exercise split (see follow-up #3), it does not
+exercise the umbrella-enrichment path (blocked, follow-up #4), and it
+does not revisit the boundary fixtures. The rollback restored the
+fixtures to their pre-apply state, so the install is back to five
+`active` skills ready for the next designed pass.
 
 ---
 
@@ -764,13 +905,20 @@ commit per change), plus an E2E verification script.
 | `f71e918` | test: pin C.deferred schema-plumbing (17 focused tests) |
 | `66ddcaa` | docs: update PROJECT_STATUS.md — C.deferred done |
 | `d7a081e` | test(e2e): curator split/deprecate dry-run end-to-end verification |
-| *this commit* | docs: update PROJECT_STATUS.md — E2E verification logged; LLM-inference verification deferred (needs real credentials) |
+| `eeb2fbd` | docs: update PROJECT_STATUS.md — E2E verification logged; LLM-inference verification deferred (needs real credentials) |
+| `67045ab` | docs: record seventh-pass real-LLM `--apply` verification (deprecate tool-call→disk→rollback all pass; split tool-call + keyword-retention friction parked as follow-ups #3/#4) |
 
 The tool-chain E2E verification (`d7a081e`) proves the plumbing
 pathway — hook interception, YAML parsing, reconciliation, report
 generation — works end-to-end against real skill data. A real
-DeepSeek run (2026-07-19) confirmed the LLM picks up the
+DeepSeek dry-run (2026-07-19) confirmed the LLM picks up the
 `split` vocabulary end-to-end (`splits_this_run=1`) but defaults
 to `consolidate` over `deprecate` for duplicates of an existing
 umbrella — see the "Real-LLM verification" note in the C.deferred
-section above.
+section above. The seventh-pass real-LLM **`--apply`** run
+(2026-07-19) then closed the last plumbing question: in a non-dry-run
+pass the model emits *real* `skill_manage(action="deprecate")` tool
+calls (`source: "model+audit"`, not `"model only"`), the disk flips
+to `state=deprecated` + `replaced_by`, and `hermes curator rollback`
+restores the tree byte-for-byte. Split-via-tool-call and the
+keyword-retention guard friction remain open (follow-ups #3/#4).
