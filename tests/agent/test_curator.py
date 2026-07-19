@@ -1026,6 +1026,285 @@ def test_cli_pin_refuses_bundled_skill(curator_env, capsys):
 
 
 # ---------------------------------------------------------------------------
+# `hermes curator audit` — read-only audit-log renderer
+#
+# Pins the F (observability dashboard) work item: F's first half is a CLI
+# surface that surfaces the audit.jsonl curator_hooks writes. The command
+# must not mutate anything — these tests only assert read behavior.
+# ---------------------------------------------------------------------------
+
+
+def _seed_audit_log(home, entries):
+    """Write a JSONL audit log under <home>/logs/curator/audit.jsonl."""
+    import json as _json
+    log_dir = home / "logs" / "curator"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / "audit.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(_json.dumps(entry, sort_keys=True) + "\n")
+    return path
+
+
+def test_cli_audit_handles_missing_log(curator_env, capsys):
+    """No log file yet → friendly message, not an exception."""
+    from hermes_cli import curator as cli
+
+    class _A:
+        limit = 20
+        since = None
+        verdict = None
+        action = None
+        json = False
+
+    rc = cli._cmd_audit(_A())
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "no log file" in captured.out
+
+
+def test_cli_audit_renders_table(curator_env, capsys):
+    """Seeded entries render as a table with verdict + per-row detail."""
+    from hermes_cli import curator as cli
+
+    _seed_audit_log(curator_env["home"], [
+        {
+            "ts": "2026-07-18T10:00:00+00:00",
+            "hook": "pre_tool_call",
+            "tool": "skill_manage",
+            "tool_call_id": "c1",
+            "session_id": "s1",
+            "verdict": "block_dry_run",
+            "action": "delete",
+            "name": "stale-skill",
+            "args": {"absorbed_into": "umbrella"},
+            "message": "dry-run blocks mutations",
+        },
+        {
+            "ts": "2026-07-18T10:01:00+00:00",
+            "hook": "pre_tool_call",
+            "tool": "skill_manage",
+            "tool_call_id": "c2",
+            "session_id": "s1",
+            "verdict": "approve_needed",
+            "action": "patch",
+            "name": "core-skill",
+            "retention_ratio": 0.42,
+            "preserved": ["k1"],
+            "missing": ["k2", "k3"],
+            "args": {},
+            "message": "retention below threshold",
+        },
+        {
+            "ts": "2026-07-18T10:02:00+00:00",
+            "hook": "pre_tool_call",
+            "tool": "terminal",
+            "tool_call_id": "c3",
+            "session_id": "s1",
+            "verdict": "block_dry_run_terminal",
+            "command_preview": "rm -rf ~/.hermes/skills/foo",
+            "skill_paths": ["/x"],
+            "message": "dry-run blocks terminal skill mutation",
+        },
+        {
+            "ts": "2026-07-18T10:03:00+00:00",
+            "hook": "post_tool_call",
+            "tool": "skill_manage",
+            "tool_call_id": "c4",
+            "session_id": "s1",
+            "action": "patch",
+            "name": "core-skill",
+            "duration_ms": 142,
+            "status": "ok",
+            "error_type": None,
+            "error_message": None,
+            "result_preview": '{"success": true}',
+        },
+    ])
+
+    class _A:
+        limit = 20
+        since = None
+        verdict = None
+        action = None
+        json = False
+
+    rc = cli._cmd_audit(_A())
+    captured = capsys.readouterr()
+    assert rc == 0
+    out = captured.out
+    # Header
+    assert "4 matching entries" in out
+    assert "block_dry_run" in out
+    assert "approve_needed" in out
+    assert "block_dry_run_terminal" in out
+    # Per-row detail
+    assert "stale-skill" in out
+    assert "core-skill" in out
+    assert "retention=0.42" in out
+    assert "rm -rf" in out  # terminal preview
+    assert "duration=142ms" in out  # post_tool_call detail
+
+
+def test_cli_audit_filters_by_verdict_and_action(curator_env, capsys):
+    """--verdict and --action narrow the result set."""
+    from hermes_cli import curator as cli
+
+    _seed_audit_log(curator_env["home"], [
+        {
+            "ts": "2026-07-18T10:00:00+00:00", "hook": "pre_tool_call",
+            "tool": "skill_manage", "tool_call_id": "c1", "session_id": "s1",
+            "verdict": "block_dry_run", "action": "delete", "name": "a",
+        },
+        {
+            "ts": "2026-07-18T10:01:00+00:00", "hook": "pre_tool_call",
+            "tool": "skill_manage", "tool_call_id": "c2", "session_id": "s1",
+            "verdict": "allow", "action": "patch", "name": "b",
+        },
+        {
+            "ts": "2026-07-18T10:02:00+00:00", "hook": "pre_tool_call",
+            "tool": "skill_manage", "tool_call_id": "c3", "session_id": "s1",
+            "verdict": "block_dry_run", "action": "patch", "name": "c",
+        },
+    ])
+
+    class _A:
+        limit = 20
+        since = None
+        verdict = "block_dry_run"
+        action = None
+        json = False
+
+    rc = cli._cmd_audit(_A())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "2 matching entries" in out
+    assert "name=a" in out
+    assert "name=c" in out
+    assert "name=b" not in out  # filtered out by verdict
+
+    _A.verdict = None
+    _A.action = "delete"
+    rc = cli._cmd_audit(_A())
+    out = capsys.readouterr().out
+    assert "1 matching entries" in out
+    assert "name=a" in out
+    assert "name=c" not in out  # action=patch filtered out
+
+
+def test_cli_audit_since_relative_filters_old_entries(curator_env, capsys):
+    """--since=2h filters out entries older than the cutoff."""
+    from hermes_cli import curator as cli
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(minutes=5)).isoformat()
+    old = (now - timedelta(days=2)).isoformat()
+
+    _seed_audit_log(curator_env["home"], [
+        {"ts": recent, "hook": "pre_tool_call", "tool": "skill_manage",
+         "tool_call_id": "c1", "session_id": "s1", "verdict": "observed"},
+        {"ts": old, "hook": "pre_tool_call", "tool": "skill_manage",
+         "tool_call_id": "c2", "session_id": "s1", "verdict": "observed"},
+    ])
+
+    class _A:
+        limit = 20
+        since = "2h"
+        verdict = None
+        action = None
+        json = False
+
+    rc = cli._cmd_audit(_A())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "1 matching entries" in out
+
+
+def test_cli_audit_json_output_is_valid_json(curator_env, capsys):
+    """--json emits a parseable JSON array of entries."""
+    import json as _json
+    from hermes_cli import curator as cli
+
+    _seed_audit_log(curator_env["home"], [
+        {"ts": "2026-07-18T10:00:00+00:00", "hook": "pre_tool_call",
+         "tool": "skill_manage", "tool_call_id": "c1", "session_id": "s1",
+         "verdict": "block_dry_run", "action": "delete", "name": "x"},
+    ])
+
+    class _A:
+        limit = 20
+        since = None
+        verdict = None
+        action = None
+        json = True
+
+    rc = cli._cmd_audit(_A())
+    out = capsys.readouterr().out
+    assert rc == 0
+    parsed = _json.loads(out)
+    assert isinstance(parsed, list)
+    assert len(parsed) == 1
+    assert parsed[0]["verdict"] == "block_dry_run"
+    assert parsed[0]["name"] == "x"
+
+
+def test_cli_audit_skips_malformed_lines(curator_env, capsys):
+    """Corrupted JSONL lines must not crash the renderer."""
+    from hermes_cli import curator as cli
+    import json as _json
+
+    log_dir = curator_env["home"] / "logs" / "curator"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "audit.jsonl"
+    with log_path.open("w", encoding="utf-8") as f:
+        f.write("{not valid json\n")
+        f.write(_json.dumps({"ts": "2026-07-18T10:00:00+00:00", "hook": "pre_tool_call",
+                              "tool": "skill_manage", "tool_call_id": "c1",
+                              "session_id": "s1", "verdict": "observed"}, sort_keys=True) + "\n")
+        f.write("also broken\n")
+
+    class _A:
+        limit = 20
+        since = None
+        verdict = None
+        action = None
+        json = False
+
+    rc = cli._cmd_audit(_A())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "1 matching entries" in out
+
+
+def test_cli_audit_does_not_mutate_log(curator_env, capsys):
+    """Read-only contract: invoking _cmd_audit must not change the log file."""
+    from hermes_cli import curator as cli
+    import json as _json
+
+    path = _seed_audit_log(curator_env["home"], [
+        {"ts": "2026-07-18T10:00:00+00:00", "hook": "pre_tool_call",
+         "tool": "skill_manage", "tool_call_id": "c1", "session_id": "s1",
+         "verdict": "block_dry_run", "action": "delete", "name": "x"},
+    ])
+    before = path.read_text(encoding="utf-8")
+
+    class _A:
+        limit = 20
+        since = None
+        verdict = None
+        action = None
+        json = False
+
+    for _ in range(3):
+        cli._cmd_audit(_A())
+        cli._cmd_audit(_A())  # second call with all attrs
+
+    after = path.read_text(encoding="utf-8")
+    assert before == after, "audit command must not modify the log file"
+
+
+# ---------------------------------------------------------------------------
 # curator review-model resolution (canonical auxiliary.curator slot)
 #
 # Curator was unified with the rest of the aux task system in Apr 2026 so

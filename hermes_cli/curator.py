@@ -10,8 +10,9 @@ the argparse subparsers on demand.
 from __future__ import annotations
 
 import argparse
+import json as _json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -488,6 +489,147 @@ def _cmd_list_archived(args) -> int:
     return 0
 
 
+def _parse_since_spec(spec: Optional[str]) -> Optional[datetime]:
+    """Parse a --since value into a tz-aware UTC datetime, or None.
+
+    Accepts:
+      * ISO date: ``"2026-07-18"``
+      * ISO datetime: ``"2026-07-18T00:00:00"`` (naive assumed UTC)
+      * Relative duration: ``"2h"``, ``"30m"``, ``"7d"``, ``"45s"``
+
+    Returns None for empty input or unparseable input. Unparseable input
+    is intentionally tolerated (and treated as "no filter") so a typo in
+    --since does not turn an otherwise safe read-only command into an
+    error.
+    """
+    if not spec:
+        return None
+    spec = spec.strip()
+    if not spec:
+        return None
+    if len(spec) >= 2 and spec[-1] in ("s", "m", "h", "d") and spec[:-1].isdigit():
+        unit = spec[-1]
+        n = int(spec[:-1])
+        delta = {
+            "s": timedelta(seconds=n),
+            "m": timedelta(minutes=n),
+            "h": timedelta(hours=n),
+            "d": timedelta(days=n),
+        }[unit]
+        return datetime.now(timezone.utc) - delta
+    try:
+        dt = datetime.fromisoformat(spec)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _cmd_audit(args) -> int:
+    """Show the curator_hooks audit log (read-only).
+
+    The audit log lives at ``<HERMES_HOME>/logs/curator/audit.jsonl`` and
+    is appended to by ``agent/curator_hooks.py`` whenever a pre_tool_call
+    or post_tool_call verdict is reached (both dry-run and real-execution
+    paths). This command only reads — it never mutates the log, the
+    usage sidecar, or any skill state.
+
+    Filters: ``--since`` (ISO date/datetime or relative duration like
+    ``2h``/``7d``), ``--verdict`` (exact match against ``verdict`` field),
+    ``--action`` (exact match against ``action`` field), ``--limit`` (max
+    entries to show, default 20, most-recent-first), ``--json`` (emit
+    matching entries as a JSON array instead of a table).
+    """
+    from hermes_constants import get_hermes_home
+
+    audit_path = get_hermes_home() / "logs" / "curator" / "audit.jsonl"
+    if not audit_path.exists():
+        print(f"curator audit: no log file at {audit_path}")
+        print("(the file is created on the first curator pass)")
+        return 0
+
+    limit = max(1, int(getattr(args, "limit", 20)))
+    verdict_filter = getattr(args, "verdict", None)
+    action_filter = getattr(args, "action", None)
+    cutoff = _parse_since_spec(getattr(args, "since", None))
+
+    entries: list = []
+    with audit_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = _json.loads(line)
+            except ValueError:
+                # Skip malformed lines — the log is forensic, never block reads.
+                continue
+            if verdict_filter and rec.get("verdict") != verdict_filter:
+                continue
+            if action_filter and rec.get("action") != action_filter:
+                continue
+            if cutoff is not None:
+                ts = rec.get("ts")
+                if not ts:
+                    continue
+                try:
+                    rec_dt = datetime.fromisoformat(ts)
+                except ValueError:
+                    continue
+                if rec_dt.tzinfo is None:
+                    rec_dt = rec_dt.replace(tzinfo=timezone.utc)
+                if rec_dt < cutoff:
+                    continue
+            entries.append(rec)
+
+    if getattr(args, "json", False):
+        print(_json.dumps(entries[-limit:], indent=2, ensure_ascii=False))
+        return 0
+
+    if not entries:
+        print("curator audit: no matching entries")
+        return 0
+
+    shown = entries[-limit:]
+    print(
+        f"curator audit: {len(entries)} matching entries "
+        f"(showing last {len(shown)})  log={audit_path}"
+    )
+    print()
+    for rec in shown:
+        ts = _fmt_ts(rec.get("ts"))
+        hook = rec.get("hook", "?")
+        verdict = rec.get("verdict", "?")
+        action = rec.get("action") or "-"
+        name = rec.get("name") or "-"
+
+        # Pick a meaningful per-row detail depending on verdict shape.
+        if verdict in ("block_dry_run", "approve_needed", "allow", "allow_no_target", "allow_no_content"):
+            detail = f"action={action} name={name}"
+            if "retention_ratio" in rec:
+                detail += f" retention={rec['retention_ratio']}"
+        elif verdict in ("block_dry_run_terminal", "approve_terminal_skill_mutation"):
+            preview = (rec.get("command_preview") or "")[:60]
+            detail = f"command={preview!r}"
+        elif verdict == "allow_terminal_no_skill_dirs":
+            detail = f"command={(rec.get('command_preview') or '')[:60]!r}"
+        elif verdict == "observed":
+            detail = f"tool={rec.get('tool', '?')}"
+        else:
+            # Post-tool-call records (status / duration_ms / result_preview).
+            if hook == "post_tool_call":
+                detail = (
+                    f"action={action} name={name} status={rec.get('status', '?')} "
+                    f"duration={rec.get('duration_ms', '?')}ms"
+                )
+            else:
+                detail = f"tool={rec.get('tool', '?')}"
+        print(f"  {ts:>10s}  {hook:13s}  {verdict:34s}  {detail}")
+
+    return 0
+
+
 def _cmd_usage(args) -> int:
     """Show usage telemetry for ALL skills, with provenance.
 
@@ -680,6 +822,35 @@ def register_cli(parent: argparse.ArgumentParser) -> None:
         help="Skip confirmation prompt",
     )
     p_rollback.set_defaults(func=_cmd_rollback)
+
+    p_audit = subs.add_parser(
+        "audit",
+        help="Show the curator_hooks audit log (read-only). "
+             "Lists dry-run blocks, approvals, and tool-call verdicts.",
+    )
+    p_audit.add_argument(
+        "--limit", type=int, default=20,
+        help="Max entries to show (most recent first, default 20).",
+    )
+    p_audit.add_argument(
+        "--since", default=None,
+        help="Filter by time. Accepts ISO date ('2026-07-18'), "
+             "ISO datetime, or relative duration ('2h', '30m', '7d').",
+    )
+    p_audit.add_argument(
+        "--verdict", default=None,
+        help="Filter by verdict (e.g. block_dry_run, approve_needed, allow, "
+             "block_dry_run_terminal, approve_terminal_skill_mutation).",
+    )
+    p_audit.add_argument(
+        "--action", default=None,
+        help="Filter by skill_manage action (patch, create, write_file, delete).",
+    )
+    p_audit.add_argument(
+        "--json", action="store_true",
+        help="Emit matching entries as a JSON array instead of a table.",
+    )
+    p_audit.set_defaults(func=_cmd_audit)
 
 
 def cli_main(argv=None) -> int:
