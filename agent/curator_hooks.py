@@ -51,7 +51,16 @@ DEFAULT_RETENTION_THRESHOLD = 0.5
 
 # Actions that mutate a skill's content or existence. Non-mutating actions
 # (view, list) are not gated.
-_MUTATING_ACTIONS = frozenset({"patch", "create", "write_file", "delete"})
+#
+# `split` and `deprecate` flip a skill's lifecycle state (hidden from
+# routing, possibly with a pointer to a replacement) without touching the
+# SKILL.md on disk. They are mutating for gating purposes — they are
+# irreversible without an explicit state flip back, and a curator could
+# otherwise route around the dry-run guard by recording a split without
+# ever touching files.
+_MUTATING_ACTIONS = frozenset({
+    "patch", "create", "write_file", "delete", "split", "deprecate",
+})
 
 # Argument fields where the LLM puts the new skill text. These are the
 # fields we scan for keyword retention.
