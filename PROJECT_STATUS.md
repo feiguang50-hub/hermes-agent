@@ -906,7 +906,7 @@ commit per change), plus an E2E verification script.
 | `66ddcaa` | docs: update PROJECT_STATUS.md — C.deferred done |
 | `d7a081e` | test(e2e): curator split/deprecate dry-run end-to-end verification |
 | `eeb2fbd` | docs: update PROJECT_STATUS.md — E2E verification logged; LLM-inference verification deferred (needs real credentials) |
-| `67045ab` | docs: record seventh-pass real-LLM `--apply` verification (deprecate tool-call→disk→rollback all pass; split tool-call + keyword-retention friction parked as follow-ups #3/#4) |
+| `29752b6` | docs: record seventh-pass real-LLM `--apply` verification (deprecate tool-call→disk→rollback all pass; split tool-call + keyword-retention friction parked as follow-ups #3/#4) |
 
 The tool-chain E2E verification (`d7a081e`) proves the plumbing
 pathway — hook interception, YAML parsing, reconciliation, report
