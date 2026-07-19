@@ -994,6 +994,67 @@ Isolation re-confirmed after the re-run: `.usage.json` md5 unchanged, no new
 snapshot, no `cron/jobs.json` created. 311 curator/skill tests pass; each fix
 has a test verified to fail without it. KNOWN_ISSUES #15/#16 marked RESOLVED.
 
+**Dirty-data dry-run verification (2026-07-19, tenth pass — uncleaned raw backup,
+stress-testing dirty-data robustness with the P0 fixes in place; read-only).**
+
+A second, larger, deliberately **uncleaned** backup
+(`D:\skills-backup-20260713-080146.tar.gz`) was extracted into a fresh isolated
+HERMES_HOME with **zero cleanup** — preserving every dirty artifact: 130 usage
+records vs 123 SKILL.md files, 7 path-prefixed record keys coexisting with
+bare-name keys, all 130 records `state=active` despite 712 `.archive/` entries
+and a `.disabled/` tree on disk, and the `agently-mail` external symlink
+(excluded from extraction only because Windows can't create it — its usage
+record is preserved). A single read-only `hermes curator run --dry-run
+--consolidate` (deepseek-chat, 60.9 s, 27 candidates) was executed.
+
+**Metrics.**
+- **Errors / exceptions handling dirty data: NONE.** Candidate enumeration and
+  the full dry-run ran cleanly (`llm_error: None`, zero tracebacks) despite the
+  record/file mismatch, orphaned path-prefixed keys, active-despite-archived
+  records, nested `.disabled`, and the external symlink.
+- **Guard firing:** 27 `skill_view` (`observed`); **0 `skill_manage`, 0
+  `block_dry_run`, 0 `approve_needed`** — as in every dry-run, the model routed
+  decisions through the YAML block, so the retention guard was not exercised.
+- **Decisions:** `consolidations=0, prunings=0, splits=0, deprecations=0`. This
+  is a **legitimate empty result**, not a parse failure: the model emitted a
+  well-formed `## Structured summary` block with all lists empty and reasoned
+  "keep all 27 — healthy class-level state; prior umbrella work was effective."
+- **Isolation:** `.usage.json` md5 unchanged, no new snapshot, no
+  `cron/jobs.json` created.
+
+**Comparison — 8th (pre-fix) / 9th (post-fix) / 10th (dirty, post-fix).**
+
+| | 8th | 9th | 10th (dirty) |
+|---|---|---|---|
+| data | export, 25 cand | same export, 25 | larger raw backup, 27 |
+| LLM proposed | 2 consolidations | 1 consol + 2 deprec | 0 (keep all) |
+| counts reported | consolidated **0** (WRONG — hid 2) | consolidated 1, deprec 2 (correct) | 0 (correct — empty block) |
+| guard fired | no | no | no |
+| errors | none | none | none |
+
+**Did the #15/#16 fixes materially help on dirtier data?**
+- **#15:** the model proposed nothing this run, so there were no consolidations
+  to surface — but the value still holds: the reported `0` is now **trustworthy**
+  (it provably matches the empty YAML block). Pre-fix, a `0` was ambiguous and
+  could hide real proposals (exactly the 8th-pass bug). The non-zero
+  surfacing was already demonstrated in the 9th pass; the 10th confirms no
+  regression and a *faithful zero* on dirtier/larger input.
+- **#16:** path resolution is data-independent and was verified on the earlier
+  real data (15–23 keywords). This run did not fire the retention guard (no
+  patches), so #16 was not re-exercised end-to-end here.
+
+**New dimension — does data inconsistency cause anomalous behavior?** On the
+evidence: **no** — the pipeline was robust to every dirty artifact, with no
+crash and no visible LLM confusion (its analysis referenced skills like
+`shopping-agent`/`baidu-netdisk` correctly). **One honest limitation:** the
+`active`-in-usage-but-physically-in-`.archive/` mismatch's effect on the
+*deterministic prune* (`apply_automatic_transitions`) is NOT exercised by a
+dry-run (the prune is skipped in dry-run). Structurally it appears benign —
+candidate enumeration is path-based (`.archive/`/`.disabled/` paths are
+excluded), so an archived-path skill never reaches the prune regardless of its
+record state — but this was not empirically confirmed in a non-dry run, which
+is out of scope for a read-only pass. Recorded as the one untested interaction.
+
 ---
 
 ---
