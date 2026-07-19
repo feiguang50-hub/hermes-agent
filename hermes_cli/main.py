@@ -315,6 +315,7 @@ from hermes_cli.subcommands.acp import build_acp_parser
 from hermes_cli.subcommands.tools import build_tools_parser
 from hermes_cli.subcommands.insights import build_insights_parser
 from hermes_cli.subcommands.skills import build_skills_parser
+from hermes_cli.subcommands.skill import build_skill_parser
 from hermes_cli.subcommands.pairing import build_pairing_parser
 from hermes_cli.subcommands.plugins import build_plugins_parser
 from hermes_cli.subcommands.mcp import build_mcp_parser
@@ -12673,7 +12674,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "project", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
-        "skills", "slack", "status", "tools", "uninstall", "update",
+        "skill", "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
@@ -13139,6 +13140,65 @@ def cmd_skills(args):
         skills_command(args)
 
 
+def cmd_skill(args):
+    """Read-only per-skill introspection. Currently only ``score``."""
+    action = getattr(args, "skill_action", None)
+    if action == "score":
+        import json as _json
+        from agent import skill_scoring
+        from tools import skill_usage
+
+        name = args.name
+        result = skill_scoring.compute_skill_score(name)
+        # Surface a one-line "no record" hint to distinguish from a real
+        # zero-score skill — helps humans tell apart "never seen" from
+        # "seen but bad".
+        rec = skill_usage.get_record(name)
+        no_record = (
+            rec.get("created_by") is None
+            and rec.get("use_count", 0) == 0
+            and rec.get("view_count", 0) == 0
+        )
+
+        if getattr(args, "json", False):
+            print(_json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+
+        print(f"skill score: {name}")
+        if no_record:
+            print("  (no usage record on file — score reflects defaults)")
+        print()
+        print(f"  score:             {result['score']:.4f}")
+        print(f"  components:")
+        comps = result["components"]
+        print(f"    success_rate:        {comps['success_rate']:.4f}")
+        print(f"    feedback_score:      {comps['feedback_score']:.4f}")
+        print(f"    recency_decay:       {comps['recency_decay']:.4f}")
+        print(f"    blend_success_fb:    {comps['blend_success_feedback']:.4f}")
+        print(f"    confidence:          {comps['confidence']:.4f}")
+        print(f"  weights:           success={result['weights']['success_rate']} "
+              f"feedback={result['weights']['user_feedback']}")
+        print(f"  sample_size:       {result['sample_size']}")
+        print(f"  feedback_total:    {result['feedback_total']}")
+        print(f"  recency_half_life: {result['recency_half_life_days']} days "
+              f"(confidence_threshold={result['confidence_threshold']})")
+        print(f"  last_outcome:      {result['last_outcome']!r} "
+              f"@ {result['last_outcome_at']!r}")
+        print(f"  last_rating:       {result['last_rating']!r}")
+        return 0
+
+    # No sub-action matched — print help so the user sees what is available.
+    import argparse as _argparse
+    parser = _argparse.ArgumentParser(
+        prog="hermes skill",
+        description="Per-skill introspection (read-only). Subcommand required.",
+    )
+    sub = parser.add_subparsers(dest="skill_action")
+    sub.add_parser("score", help="Show the 0–1 quality score for a skill")
+    parser.print_help()
+    return 1
+
+
 def cmd_pairing(args):
     from hermes_cli.pairing import pairing_command
 
@@ -13534,6 +13594,12 @@ def main():
     # skills command  (parser built in hermes_cli/subcommands/skills.py)
     # =========================================================================
     build_skills_parser(subparsers, cmd_skills=cmd_skills)
+
+    # =========================================================================
+    # skill command (singular) — read-only per-skill introspection
+    # (parser built in hermes_cli/subcommands/skill.py)
+    # =========================================================================
+    build_skill_parser(subparsers, cmd_skill=cmd_skill)
 
     # =========================================================================
     # bundles command — skill bundles (alias /<name> for multiple skills)
