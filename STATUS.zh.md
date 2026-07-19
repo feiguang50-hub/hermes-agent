@@ -87,6 +87,8 @@ f7ea70d feat(tools/skill-manager): wire split/deprecate through schema
 
 - 全部 P0 / P1 修复都附回归测试,且**已验证"去掉修复就失败"**。
 - 所有"接了真实数据就崩溃"的潜在问题都跑了真实 export 验证。
+- **2b 端到端**:用合成数据(1 个 quality=0.09 / 1 个 1.0)跑真实 LLM dry-run,LLM 读了 inline 列后,deprecate 了**只**那个差的,replaced_by 指向好的,reason 明确引用 "abysmal quality (3/20 success)" / "6/0 thumbs up"。**闭环端到端驱动决策,已证实。**
+- **真实数据 / 闭环接通后形态**:同一批 27 技能真实数据上跑两次,LLM 一次 keep all、十轮那次 deprecate `shopping-agent` 进了 `remote-access-setup` umbrella——**同一数据、同一模型、相反结论**,实证了 Fixture B rubric 洞(LLM 在边界案例上的不稳定性)。这正是"接了传感器但数据为零"的真实形态:quality 列没数据时 LLM 退回 activity + prompt 规则,边界案例就会随机。**真实使用累积 outcome/feedback 之后,quality 列开始区分好坏,决策会稳定下来。**
 - 真实数据 5-fixture `--apply` 端到端(deprecate 全链路):通过 + rollback 字节级一致。
 
 ## 测试结果
