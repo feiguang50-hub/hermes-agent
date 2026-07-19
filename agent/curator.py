@@ -367,6 +367,15 @@ def apply_automatic_transitions(now: Optional[datetime] = None) -> Dict[str, int
 
         current = row.get("state", _u.STATE_ACTIVE)
 
+        # split / deprecated are deliberate lifecycle decisions made by the
+        # curator (or a human): the skill is intentionally hidden from routing
+        # and carries a split_into / replaced_by pointer. The deterministic
+        # inactivity prune must NOT archive them — doing so overwrites the
+        # lifecycle state and moves the stub into .archive/, destroying the
+        # pointer the design promises to keep on disk. Leave them untouched.
+        if current in (_u.STATE_SPLIT, _u.STATE_DEPRECATED):
+            continue
+
         # Never-used skills (use_count == 0) get a grace floor: don't archive
         # one until it is at least stale_after_days old. A use=0 skill is
         # absence of evidence, not evidence of staleness — a skill created
