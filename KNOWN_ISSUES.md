@@ -4,8 +4,9 @@ Last updated: 2026-07-19. Companion to `PROJECT_STATUS.md`.
 
 **Status:** P0 (all 3) + two P1 items (R15, doc contradiction) resolved on
 2026-07-19 with focused commits + tests. P1 #5–#7, P2, P3, P4 remain open by
-design (P2/P3/P4 explicitly deferred). Items #15–#16 added 2026-07-19 from the
-eighth-pass real-data dry-run (both P1-severity, code untouched).
+design (P2/P3/P4 explicitly deferred). Items #15–#16 (escalated to P0 on
+2026-07-19 from the eighth-pass real-data dry-run) are now **RESOLVED** with
+focused commits + tests, and re-verified against the real data.
 
 This file is the consolidated, prioritized backlog produced by a full read-only
 project review (no code changed). It merges: (a) TODOs previously scattered
@@ -133,39 +134,46 @@ re-confirmed.
 
 ---
 
-## P1 — added 2026-07-19 (eighth pass, real-data dry-run findings)
+## P0 — added 2026-07-19 (eighth pass, real-data dry-run findings; escalated from P1)
 
 These two surfaced only when running against a real exported skill library
 (nested category dirs + CJK); the flat-English fixtures could never expose
-them. Both are P1-severity (they weaken real-world behavior). See the
-"Real-data dry-run verification (eighth pass)" section in `PROJECT_STATUS.md`.
+them. **Escalated to P0** at the user's direction: #15 breaks the correctness
+of the dry-run preview itself (the core read-only safety promise — the report
+is wrong), and #16 means the keyword-retention guard is effectively off in the
+exact target environment (Chinese skill content + nested category dirs). See
+the "Real-data dry-run verification (eighth pass)" section in `PROJECT_STATUS.md`.
 
-15. **Dry-run under-reports consolidation proposals.** `[verified]`
+15. **✅ RESOLVED (commit `a139078`) — Dry-run under-reported consolidation
+    proposals.** `[verified]`
     `agent/curator.py:695` `_classify_removed_skills` derives
     `consolidations` / `prunings` from *actually removed* skills. Dry-run
     removes nothing, so a model that proposes consolidations (its dominant
-    verb on real data) yields `consolidated_this_run=0` and empty
-    `consolidations[]` — while `REPORT.md` prints "consolidated into
-    umbrellas: 0" above a prose body proposing real merges. Splits /
-    deprecations DO surface from the YAML block in dry-run (C.deferred
-    wiring), so the reporting is **asymmetric** and a dry-run preview
-    silently drops the consolidation plan. **Candidate fix:** surface the
-    YAML-block `consolidations:` / `prunings:` proposals in the dry-run
-    counts/arrays (parallel to how splits/deprecations are surfaced), marked
-    as proposed rather than applied.
+    verb on real data) yielded `consolidated_this_run=0` and empty
+    `consolidations[]` — while `REPORT.md` printed "consolidated into
+    umbrellas: 0" above a prose body proposing real merges. **Fix:**
+    `_write_run_report` now takes `dry_run` and, in dry-run only, folds the
+    YAML-block `consolidations:` / `prunings:` proposals into the counts/
+    arrays (tagged `source="model (proposed, dry-run)"`, behind a DRY-RUN
+    banner). The fold runs AFTER the cron-rewrite block so a dry-run never
+    mutates `cron/jobs.json`; real-run classification is unchanged (guarded by
+    `test_non_dry_run_does_not_synthesize_proposals`). **Real-data re-verify:**
+    the isolated dry-run now reports `consolidated_this_run=1`
+    (`shopping-agent → web-tools-guide`, proposed) instead of 0.
 
-16. **Keyword-retention guard is near-inert on nested / CJK skills.**
-    `[verified]` `agent/curator_hooks.py` `_load_skill_keywords` resolves
-    only the flat path `<skills_dir>/<name>`, so for nested-category skills
-    (the real-world norm) it fails to find the SKILL.md and falls back to
-    **name-only** keywords — the retention check then compares new content
-    against just the skill's own name (no real protection). `skill_usage.
-    _find_skill_dir` already resolves nested paths, so the two resolvers
-    disagree. Compounded by CJK descriptions tokenizing into single
-    characters (P4). **Candidate fix:** have `_load_skill_keywords` use the
-    same nested-aware resolver as `skill_usage._find_skill_dir`; then address
-    CJK tokenization (P4). Note: this weakens the *retention* check only —
-    the R13 dry-run *block* is keyword-independent and unaffected.
+16. **✅ RESOLVED (commit `59bf254`) — Keyword-retention guard was near-inert
+    on nested / CJK skills.** `[verified]`
+    `agent/curator_hooks.py` `_load_skill_keywords` resolved only the flat
+    path `<skills_dir>/<name>`, so nested-category skills (the real norm) fell
+    back to name-only keywords. **Fix:** added a nested-aware fallback via
+    `skill_usage._find_skill_dir` (matches frontmatter `name:`, handles both
+    layouts). Tests: nested keyword extraction, end-to-end retention
+    escalation for a gutting patch, CJK path resolution. **Real-data
+    re-verify:** nested/CJK skills now extract 15–23 keywords (was 1–2
+    name-only). The R13 dry-run *block* was keyword-independent and
+    unaffected. NOTE: CJK still tokenizes to single characters — the tokenizer
+    quality remains open under **P4** (this fix restores path resolution, not
+    CJK segmentation).
 
 ---
 

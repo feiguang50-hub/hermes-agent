@@ -941,7 +941,7 @@ split/deprecate proposals but silently drops consolidation proposals.
 `REPORT.md`'s header even prints "consolidated into umbrellas: **0**" above
 a body that proposes two. The fixtures hid this because they happened to
 elicit split/deprecate; real data preferred consolidation. Recorded as
-KNOWN_ISSUES P1.
+KNOWN_ISSUES #15 (escalated to P0 2026-07-19).
 
 **🔴 NEW finding — keyword-retention guard is near-inert on the real
 library (verified, structural).** `_load_skill_keywords` resolves only the
@@ -950,7 +950,8 @@ real norm) it fails to find the SKILL.md and falls back to **name-only**
 keywords; a patch is then "retention-checked" against just the skill's own
 name. Compounded by **CJK descriptions tokenizing into single characters**
 (小/荧/音/乐…). Neither showed up in the flat-English fixtures. Recorded as
-KNOWN_ISSUES P1 (guard-efficacy) + reinforces the P4 CJK item.
+KNOWN_ISSUES #16 (escalated to P0 2026-07-19, guard-efficacy) + reinforces the
+P4 CJK item.
 
 **🟠 Data-integrity oddities (informational).** 132 usage records vs 76
 SKILL.md files (orphans); path-prefixed record keys
@@ -968,6 +969,30 @@ messy, nested, bilingual library, and the LLM's decisions were reasonable.
 Two real gaps that fixtures could never expose surfaced — the dry-run
 consolidation-reporting blind spot and the nested-path/CJK keyword-guard
 weakness — both recorded in KNOWN_ISSUES, no code changed this pass.
+
+**Fix + real-data re-verification (2026-07-19, ninth pass — the two eighth-pass
+P0s fixed and re-checked against the same real data).**
+
+Both eighth-pass findings (escalated to P0 at the user's direction) were fixed
+with focused commits + tests, then re-verified against the same isolated real
+library (read-only dry-run, no `--apply`):
+
+- **#16 (`59bf254`)** — `_load_skill_keywords` gained a nested-aware fallback
+  (`skill_usage._find_skill_dir`). Re-verify: the real nested/CJK skills now
+  extract **15–23 keywords** (was 1–2 name-only) — e.g. `music-knowledge-rag`
+  23, `remote-access-setup` 22 with real tokens. CJK still tokenizes per-char
+  (tracked under P4).
+- **#15 (`a139078`)** — `_write_run_report(dry_run=...)` now folds the model's
+  YAML-block consolidation/pruning **proposals** into the dry-run counts/arrays
+  (tagged `model (proposed, dry-run)`, behind a DRY-RUN banner), placed after
+  the cron-rewrite block so a dry-run never mutates `cron/jobs.json`. Re-verify:
+  the isolated real-data dry-run now reports `consolidated_this_run=1`
+  (`shopping-agent → web-tools-guide`, proposed) instead of 0; REPORT.md shows
+  the banner and "(proposed)" labels.
+
+Isolation re-confirmed after the re-run: `.usage.json` md5 unchanged, no new
+snapshot, no `cron/jobs.json` created. 311 curator/skill tests pass; each fix
+has a test verified to fail without it. KNOWN_ISSUES #15/#16 marked RESOLVED.
 
 ---
 
