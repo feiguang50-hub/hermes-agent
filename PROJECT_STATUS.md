@@ -887,6 +887,88 @@ does not revisit the boundary fixtures. The rollback restored the
 fixtures to their pre-apply state, so the install is back to five
 `active` skills ready for the next designed pass.
 
+**Real-data dry-run verification (2026-07-19, eighth pass — first run against
+a real exported skill library, not hand-built fixtures; read-only, no `--apply`).**
+
+A real skill library (`D:\skills_export.tar.gz`, exported from a live Linux
+Hermes install) was imported into a **dedicated isolated HERMES_HOME**
+(`C:\Users\31374\hermes-realdata-test`, entirely separate from the `~/.hermes`
+fixture env) and a single read-only dry-run was executed:
+`hermes curator run --dry-run --consolidate` (deepseek-chat, 75.8 s).
+Artefacts: `<iso>/logs/curator/20260719-092021/{run.json,REPORT.md}`,
+`<iso>/skills/.curator_backups/audit.jsonl`.
+
+**Scale/shape vs fixtures:** 76 SKILL.md total, **25 curator-managed
+candidates** (vs 5 hand-built fixtures), organised in **nested category
+directories** (`ai-music/…`, `productivity/…`), mixed English + **CJK**
+content, plus `.archive/`, `.hub/`, `.disabled/` trees and an external
+symlink skill.
+
+**Isolation + safety verified.** `.usage.json` md5 unchanged before/after
+(`c9045a9c…`); no new dry-run snapshot created (backups still end at the
+real `2026-07-13` entry); no skill files mutated. The dry-run is genuinely
+read-only, confirmed on real data.
+
+**Decision quality (good).** The LLM read all 25 skills and made
+**sensible, conservative calls**: it proposed **2 consolidations**
+(`shopping-agent → remote-access-setup`; `personal-identity →
+autonomous-operation`) with cited rationale, and **correctly kept the rest
+standalone** — e.g. it recognised `music-knowledge-rag` has 29+ reference
+files and distinct triggers (`B站分析`, 歌曲分析) and left it alone, kept
+`skills-library-maintenance` vs skill-authoring separate, and noted
+`remote-access-setup` had already absorbed its siblings. No hallucinated
+splits/deprecations (0/0). It comprehended the CJK skills fine.
+
+**Guards were NOT exercised this run — honest caveat.** All **25 tool calls
+were `skill_view` (verdict `observed`); zero `skill_manage`, zero
+`block_dry_run`.** As in every prior dry-run, the model routed decisions
+through the YAML `## Structured summary` block, not tool calls — so the
+keyword-retention guard, the R13 dry-run block, and the R7 prune-skip were
+**not triggered**. This run stress-tested the *decision + reporting* layer,
+not the guards. (The guards' real-data behavior is examined structurally
+below and recorded as new KNOWN_ISSUES items.)
+
+**🔴 NEW finding — consolidation proposals are invisible in the dry-run
+structured output (materially misleading on real data).** The model's
+dominant verb here was **consolidation**, and `run.json` reported
+`consolidated_this_run=0` with an empty `consolidations[]` — while the
+prose body proposed 2 concrete merges. Root cause (by design, but newly
+material): `_classify_removed_skills` derives `consolidations`/`prunings`
+from *actually removed* skills, and dry-run removes nothing — whereas
+splits/deprecations DO surface from the YAML block in dry-run (the
+C.deferred wiring). So there is an **asymmetry**: a dry-run preview counts
+split/deprecate proposals but silently drops consolidation proposals.
+`REPORT.md`'s header even prints "consolidated into umbrellas: **0**" above
+a body that proposes two. The fixtures hid this because they happened to
+elicit split/deprecate; real data preferred consolidation. Recorded as
+KNOWN_ISSUES P1.
+
+**🔴 NEW finding — keyword-retention guard is near-inert on the real
+library (verified, structural).** `_load_skill_keywords` resolves only the
+flat path `<skills_dir>/<name>`, so for **nested-category skills** (the
+real norm) it fails to find the SKILL.md and falls back to **name-only**
+keywords; a patch is then "retention-checked" against just the skill's own
+name. Compounded by **CJK descriptions tokenizing into single characters**
+(小/荧/音/乐…). Neither showed up in the flat-English fixtures. Recorded as
+KNOWN_ISSUES P1 (guard-efficacy) + reinforces the P4 CJK item.
+
+**🟠 Data-integrity oddities (informational).** 132 usage records vs 76
+SKILL.md files (orphans); path-prefixed record keys
+(`productivity/ai-music-generation`) coexisting with bare-name keys, so the
+bare-name lookup orphans the path-keyed telemetry; all 132 records
+`state=active` despite a populated on-disk `.archive/`; a `.disabled/`
+category tree; an external symlink skill (`agently-mail →
+../../.agents/skills/…`) that breaks `tar` on Windows and is correctly
+excluded from candidates. Scoring is recency-only (all ~0.87–0.92,
+success/feedback pinned at 0.5, confidence 0 → the prompt's `<0.5`
+thresholds never fire).
+
+**Bottom line.** The pipeline ran cleanly and safely on a real,
+messy, nested, bilingual library, and the LLM's decisions were reasonable.
+Two real gaps that fixtures could never expose surfaced — the dry-run
+consolidation-reporting blind spot and the nested-path/CJK keyword-guard
+weakness — both recorded in KNOWN_ISSUES, no code changed this pass.
+
 ---
 
 ---
