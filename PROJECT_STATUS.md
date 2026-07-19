@@ -440,6 +440,117 @@ takes this next:
   natural test — but it requires backing up the fixture skills
   first.
 
+**Real-LLM verification (2026-07-19, fifth pass — post-rubric-reorder):
+the two designed-deprecate cases now deprecate, but the YAML→tool-call
+channel is still unverified.** A second real
+`hermes curator run --dry-run --consolidate` was executed against the
+**same** five fixture skills as the prior pass (`pr-triage-salvage`,
+`anthropic-api-debugging`, `openai-api-debugging`,
+`llm-api-debugging`, `diagnose-cron-timeout`) — fixture files
+preserved unchanged at `~/.hermes/.fixture-backup-20260719-prepostrubric/`
+so the only delta is the prompt text. Same model (`deepseek-chat`
+via `deepseek` provider, configured under `auxiliary.curator` in
+`~/.hermes/config.yaml`); prompt changes from commits `ac2f8f0`
+(deprecate reordering) + `34b293a` (test pin) in place. Raw
+artefacts:
+
+- `~/.hermes/logs/curator/20260719-061712/run.json`
+- `~/.hermes/logs/curator/20260719-061712/REPORT.md`
+- `~/.hermes/logs/curator/audit.jsonl` (curator context session
+  `20260719_141717_a43d0c`)
+
+Result counts vs the prior pass:
+
+| Count | PRIOR (old prompt) | NEW (deprecate-first) |
+|---|---|---|
+| `splits_this_run` | 1 | 1 |
+| `deprecations_this_run` | **0** | **2** |
+| `consolidated_this_run` | 0 | 0 |
+| `pruned_this_run` | 0 | 0 |
+| Duration | 66.89 s | 53.13 s |
+| Tool calls | 8 | 9 |
+
+Per-skill decision vs the designed-for matrix:
+
+| Skill | Designed-for | PRIOR got | NEW got |
+|---|---|---|---|
+| `pr-triage-salvage` | split | ✓ split | ✓ split |
+| `anthropic-api-debugging` | **deprecate** | consolidate→delete (wrong) | **deprecate replaced_by=llm-api-debugging** ✓ |
+| `openai-api-debugging` | **deprecate** | consolidate→delete (wrong) | **deprecate replaced_by=llm-api-debugging** ✓ |
+| `llm-api-debugging` | keep | ✓ keep | ✓ keep |
+| `diagnose-cron-timeout` | keep | ✓ keep | ✓ keep |
+
+Designed-deprecate count landed: 5/5 — both
+`anthropic-api-debugging` and `openai-api-debugging` are now in the
+`deprecations:` block with `replaced_by: llm-api-debugging`. The
+LLM's `llm_final` text cites the new rubric's vocabulary explicitly:
+
+> **Rationale: Path a (deprecate) applies** — a superset umbrella
+> already exists, the narrow siblings add no unique content.
+
+— i.e. the model read the path letterings `a`/`b`/`c`/`d`/`e` and
+applied `a` rather than reaching for `consolidations:` first. Both
+`deprecations:` reasons also mirror the rubric's
+"unique paragraph / example / template" question:
+
+- `anthropic-api-debugging` — *"Strict subset of `llm-api-debugging`
+  with zero unique content (the single 'check API key' line is
+  trivial boilerplate also applicable to other providers)."*
+- `openai-api-debugging` — *"Strict subset of `llm-api-debugging`
+  with zero unique content beyond trivial API-key-check preamble."*
+
+**Caveats — what this pass does and does not prove.**
+
+1. **Decisions still go through the YAML block only.** Like the
+   prior pass, the model emitted zero
+   `skill_manage(action="split"|"deprecate"|"delete")` tool
+   calls; both deprecations went into the YAML `deprecations:`
+   block (`source: "model only"` in `run.json`, not
+   `"tool-call audit"` or `"model+audit"`). In `--dry-run` this is
+   correct (the prompt banner says "produce a report only — no
+   `skill_manage` mutations"). The **follow-up two paragraphs
+   above is still open** — a `--apply` run that exercises the
+   YAML → tool-call → audit-log path with the new rubric remains
+   undone.
+2. **Single run, single model, single temperature.** One
+   `deepseek-chat` invocation at default settings. No multi-model
+   sweep, no `reasoning_effort: max` variant. A different model —
+   or the same model at different sampling settings — could in
+   principle revert the rubric effect. This pass confirms that
+   this model on this fixture picks up the new vocabulary; it is
+   not a guarantee that every model on every fixture will.
+3. **Fixture content is unambiguously designed.** The
+   provider-specific skills are strictly smaller than the
+   umbrella by hand-crafted construction; the rubric's
+   "unique paragraph / example / template" call has an obvious
+   answer. **A live creator-curator pass against real
+   agent-created skills — where the call is a judgement — could
+   land differently from this 5/5.** The fixture validates
+   that the prompt reaches the LLM and steers the decision
+   correctly when the case is unambiguous; it does not validate
+   every real-world edge case.
+4. **No regression in the non-target skills checked.** `split`
+   count stayed at 1, `consolidated_this_run` stayed at 0,
+   `pruned_this_run` stayed at 0, the umbrella and the singleton
+   are both kept. So reordering deprecate ahead of consolidate
+   in the rubric did not regress the other paths on this
+   fixture. (Single-fixture limitation applies here too.)
+
+In short: the follow-up at lines 428–436 of this section
+(*"put deprecate ahead of consolidate in the decision rubric"* +
+*"explicitly contrast the two"*) is satisfied for this fixture on
+this model. The companion follow-up at lines 437–441 (a `--apply`
+run that exercises the YAML → tool-call channel) is **not**
+satisfied by this pass and remains open.
+
+Branch state additions:
+
+| Commit | What |
+|--------|------|
+| `ac2f8f0` | feat(agent/curator): put deprecate ahead of consolidate in lifecycle rubric |
+| `34b293a` | test(agent/curator): pin deprecate-ahead-of-consolidate ordering |
+| *this commit* | docs: record post-rubric real-LLM verification (deprecate-first prompt lands the designed decision on the designed fixture) |
+
 ---
 
 ## Branch state
