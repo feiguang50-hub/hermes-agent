@@ -362,6 +362,106 @@ def test_report_md_splits_consolidated_and_pruned_sections(curator_env):
     assert "### Skills archived" not in md
 
 
+_DRYRUN_YAML_FINAL = """Here is my analysis.
+
+## Structured summary
+
+```yaml
+consolidations:
+  - from: shopping-agent
+    into: remote-access-setup
+    reason: narrow consumer of the same infrastructure
+prunings:
+  - name: dead-thing
+    reason: unused and obsolete
+splits: []
+deprecations: []
+```
+"""
+
+
+def test_dry_run_surfaces_consolidation_and_pruning_proposals(curator_env):
+    """#15: in dry-run nothing is removed, but the model's YAML-block
+    consolidation/pruning PROPOSALS must still surface in run.json counts +
+    arrays and REPORT.md, tagged as proposed."""
+    curator = curator_env
+    start = datetime.now(timezone.utc)
+
+    # dry-run → before == after (no removals)
+    skills = [
+        {"name": "shopping-agent", "state": "active", "pinned": False},
+        {"name": "remote-access-setup", "state": "active", "pinned": False},
+        {"name": "dead-thing", "state": "active", "pinned": False},
+    ]
+    run_dir = curator._write_run_report(
+        started_at=start,
+        elapsed_seconds=10.0,
+        auto_counts={"checked": 3, "marked_stale": 0, "archived": 0, "reactivated": 0},
+        auto_summary="no changes",
+        before_report=skills,
+        before_names={r["name"] for r in skills},
+        after_report=skills,
+        llm_meta={
+            "final": _DRYRUN_YAML_FINAL,
+            "summary": "proposals only",
+            "model": "m", "provider": "p", "error": None,
+            "tool_calls": [],  # dry-run: model used the YAML channel, no tool calls
+        },
+        dry_run=True,
+    )
+
+    payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert payload["dry_run"] is True
+    # counts now reflect the proposals (previously all 0 in dry-run)
+    assert payload["counts"]["consolidated_this_run"] == 1
+    assert payload["counts"]["pruned_this_run"] == 1
+    cons = payload["consolidated"]
+    assert [e["name"] for e in cons] == ["shopping-agent"]
+    assert cons[0]["into"] == "remote-access-setup"
+    assert "proposed" in cons[0].get("source", "")
+    assert [e["name"] for e in payload["pruned"]] == ["dead-thing"]
+
+    md = (run_dir / "REPORT.md").read_text(encoding="utf-8")
+    assert "DRY-RUN preview" in md
+    assert "consolidated into umbrellas (proposed): **1**" in md
+    assert "pruned (archived for staleness) (proposed): **1**" in md
+
+    # SAFETY: dry-run proposals must not have triggered a cron rewrite.
+    assert payload.get("cron_rewrites", {}).get("jobs_updated", 0) == 0
+
+
+def test_non_dry_run_does_not_synthesize_proposals(curator_env):
+    """Guard: proposals are surfaced ONLY in dry-run. A real run with no
+    removals must still report 0 consolidations (classification stays
+    removal-based), so existing real-run semantics are unchanged."""
+    curator = curator_env
+    start = datetime.now(timezone.utc)
+    skills = [
+        {"name": "shopping-agent", "state": "active", "pinned": False},
+        {"name": "remote-access-setup", "state": "active", "pinned": False},
+    ]
+    run_dir = curator._write_run_report(
+        started_at=start,
+        elapsed_seconds=10.0,
+        auto_counts={"checked": 2, "marked_stale": 0, "archived": 0, "reactivated": 0},
+        auto_summary="no changes",
+        before_report=skills,
+        before_names={r["name"] for r in skills},
+        after_report=skills,
+        llm_meta={
+            "final": _DRYRUN_YAML_FINAL,
+            "summary": "proposals only",
+            "model": "m", "provider": "p", "error": None,
+            "tool_calls": [],
+        },
+        dry_run=False,
+    )
+    payload = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert payload["dry_run"] is False
+    assert payload["counts"]["consolidated_this_run"] == 0
+    assert payload["counts"]["pruned_this_run"] == 0
+
+
 # ---------------------------------------------------------------------------
 # _parse_structured_summary — extracting the model's required YAML block
 # ---------------------------------------------------------------------------

@@ -1421,6 +1421,7 @@ def _write_run_report(
     before_names: Set[str],
     after_report: List[Dict[str, Any]],
     llm_meta: Dict[str, Any],
+    dry_run: bool = False,
 ) -> Optional[Path]:
     """Write run.json + REPORT.md under logs/curator/{YYYYMMDD-HHMMSS}/.
 
@@ -1553,9 +1554,42 @@ def _write_run_report(
             "error": str(e),
         }
 
+    # #15 fix: in dry-run nothing is actually removed, so the removal-based
+    # classification above leaves `consolidated` / `pruned` empty even when
+    # the model proposed merges/prunings in its YAML block. Splits and
+    # deprecations already surface their YAML proposals in dry-run (via
+    # `_reconcile_lifecycle`), so consolidations/prunings were the odd ones
+    # out — a dry-run preview under-reported what the curator WOULD do.
+    # Surface the model_block proposals here, tagged so a reader can tell a
+    # proposal apart from an applied change. This runs AFTER the cron-rewrite
+    # block above so a dry-run preview never rewrites cron/jobs.json.
+    if dry_run:
+        _have_cons = {e.get("name") for e in consolidated if isinstance(e, dict)}
+        for e in model_block.get("consolidations", []) or []:
+            nm = e.get("from")
+            if nm and nm not in _have_cons:
+                consolidated.append({
+                    "name": nm,
+                    "into": e.get("into", ""),
+                    "reason": e.get("reason", ""),
+                    "source": "model (proposed, dry-run)",
+                })
+                _have_cons.add(nm)
+        _have_prun = {e.get("name") for e in pruned if isinstance(e, dict)}
+        for e in model_block.get("prunings", []) or []:
+            nm = e.get("name")
+            if nm and nm not in _have_prun:
+                pruned.append({
+                    "name": nm,
+                    "reason": e.get("reason", ""),
+                    "source": "model (proposed, dry-run)",
+                })
+                _have_prun.add(nm)
+
     payload = {
         "started_at": started_at.isoformat(),
         "duration_seconds": round(elapsed_seconds, 2),
+        "dry_run": bool(dry_run),
         "model": llm_meta.get("model", ""),
         "provider": llm_meta.get("provider", ""),
         "auto_transitions": auto_counts,
@@ -1630,6 +1664,13 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
     dur_label = f"{mins}m {secs}s" if mins else f"{secs}s"
 
     lines.append(f"# Curator run — {started}\n")
+    if p.get("dry_run"):
+        lines.append(
+            "> **DRY-RUN preview — read-only.** No skills were changed. "
+            "Consolidations / prunings listed below are the model's "
+            "**proposals** (what a real run would attempt), not applied "
+            "changes.\n"
+        )
     model = p.get("model") or "(not resolved)"
     prov = p.get("provider") or "(not resolved)"
     counts = p.get("counts") or {}
@@ -1655,12 +1696,13 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
     # LLM pass numbers
     tc_counts = p.get("tool_call_counts") or {}
     lines.append("## LLM consolidation pass\n")
+    _proposed = " (proposed)" if p.get("dry_run") else ""
     lines.append(f"- tool calls: **{counts.get('tool_calls_total', 0)}** "
                  f"(by name: {', '.join(f'{k}={v}' for k, v in sorted(tc_counts.items())) or 'none'})")
-    lines.append(f"- consolidated into umbrellas: **{counts.get('consolidated_this_run', 0)}**")
-    lines.append(f"- pruned (archived for staleness): **{counts.get('pruned_this_run', 0)}**")
-    lines.append(f"- split into replacements: **{counts.get('splits_this_run', 0)}**")
-    lines.append(f"- deprecated (superseded by umbrella): **{counts.get('deprecations_this_run', 0)}**")
+    lines.append(f"- consolidated into umbrellas{_proposed}: **{counts.get('consolidated_this_run', 0)}**")
+    lines.append(f"- pruned (archived for staleness){_proposed}: **{counts.get('pruned_this_run', 0)}**")
+    lines.append(f"- split into replacements{_proposed}: **{counts.get('splits_this_run', 0)}**")
+    lines.append(f"- deprecated (superseded by umbrella){_proposed}: **{counts.get('deprecations_this_run', 0)}**")
     lines.append(f"- new skills this run: **{counts.get('added_this_run', 0)}**")
     lines.append(f"- state transitions (active ↔ stale ↔ archived): "
                  f"**{counts.get('state_transitions', 0)}**")
@@ -2029,6 +2071,7 @@ def run_curator_review(
                     before_names=before_names,
                     after_report=after_report,
                     llm_meta=llm_meta,
+                    dry_run=dry_run,
                 )
                 if report_path is not None:
                     state2["last_report_path"] = str(report_path)
@@ -2147,6 +2190,7 @@ def run_curator_review(
                 before_names=before_names,
                 after_report=after_report,
                 llm_meta=llm_meta,
+                dry_run=dry_run,
             )
             if report_path is not None:
                 state2["last_report_path"] = str(report_path)
