@@ -99,6 +99,37 @@ FEEDBACK_UP = "up"
 FEEDBACK_DOWN = "down"
 _VALID_FEEDBACK = frozenset({FEEDBACK_UP, FEEDBACK_DOWN})
 
+# ---------------------------------------------------------------------------
+# Per-turn skill-use tracking (feeds the turn-end outcome sensor)
+# ---------------------------------------------------------------------------
+# A conversation turn accumulates the set of skills actually used (loaded /
+# invoked) during it, so the turn finalizer can record one outcome per skill.
+# The set lives in a ContextVar so concurrent turns (e.g. the gateway handling
+# multiple sessions) never cross-contaminate — each turn's context gets its
+# own set. Unset by default: bump_use only contributes once a turn explicitly
+# begins tracking, so nothing changes for callers that never start a turn.
+from contextvars import ContextVar
+
+_turn_skills_used: ContextVar[Optional[Set[str]]] = ContextVar(
+    "_turn_skills_used", default=None
+)
+
+
+def begin_turn_skill_tracking() -> None:
+    """Start (or reset) per-turn skill-use tracking for the current context.
+
+    Called once at the start of each conversation turn. Installs a fresh empty
+    set that ``bump_use`` populates; the turn finalizer reads it via
+    ``get_turn_skills_used``.
+    """
+    _turn_skills_used.set(set())
+
+
+def get_turn_skills_used() -> Set[str]:
+    """Skills used in the current turn (empty set if tracking never started)."""
+    s = _turn_skills_used.get()
+    return set(s) if s else set()
+
 # Cap on how many free-text feedback notes we retain per skill. The schema
 # stays small (handful of strings), avoiding unbounded growth if a skill is
 # heavily used and gets frequent notes.
@@ -709,6 +740,10 @@ def bump_use(skill_name: str) -> None:
     """
     if is_background_review():
         return
+    # Feed the per-turn outcome sensor (no-op unless a turn started tracking).
+    _turn_set = _turn_skills_used.get()
+    if _turn_set is not None and skill_name:
+        _turn_set.add(skill_name)
     def _apply(rec: Dict[str, Any]) -> None:
         rec["use_count"] = int(rec.get("use_count") or 0) + 1
         rec["last_used_at"] = _now_iso()
@@ -724,6 +759,75 @@ def bump_patch(skill_name: str) -> None:
         rec["patch_count"] = int(rec.get("patch_count") or 0) + 1
         rec["last_patched_at"] = _now_iso()
     _mutate(skill_name, _apply)
+
+
+# Turn-exit reasons (substrings/prefixes) that signal the turn did not
+# complete cleanly. Kept here next to the outcome constants so the mapping
+# lives with the vocabulary it maps to.
+_FAILURE_EXIT_PREFIXES = (
+    "error_", "all_retries", "interrupted_during", "guardrail_halt",
+    "max_iterations_reached",
+)
+
+
+def infer_turn_outcome(
+    *,
+    interrupted: bool = False,
+    failed: bool = False,
+    turn_exit_reason: Optional[str] = None,
+    final_response: Optional[str] = None,
+    cleanup_errors: Optional[List[Any]] = None,
+) -> str:
+    """Map end-of-turn signals to one outcome for the skills used this turn.
+
+    This is TURN-LEVEL inference attributed to every skill used in the turn
+    (source ``auto``); it is coarse by construction — a skill loaded but not
+    actually responsible for the result still gets credited/blamed. The
+    scoring layer damps this via its confidence threshold (needs >=5 outcomes
+    before ``success_rate`` is trusted).
+
+    Policy:
+      * user interrupt (``/stop``)                         -> ``abandoned``
+      * hard failure (``failed`` flag, or an exit reason
+        indicating error / guardrail / retries / max-iters) -> ``failure``
+      * empty / missing final response                     -> ``failure``
+      * response delivered but teardown raised             -> ``unknown``
+      * otherwise                                          -> ``success``
+    """
+    if interrupted:
+        return OUTCOME_ABANDONED
+    reason = (turn_exit_reason or "").strip().lower()
+    if failed or any(reason.startswith(p) for p in _FAILURE_EXIT_PREFIXES):
+        return OUTCOME_FAILURE
+    resp = final_response.strip() if isinstance(final_response, str) else ""
+    if not resp or resp == "(empty)":
+        return OUTCOME_FAILURE
+    if cleanup_errors:
+        return OUTCOME_UNKNOWN
+    return OUTCOME_SUCCESS
+
+
+def record_turn_skill_outcomes(
+    skills,
+    outcome: str,
+    source: str = OUTCOME_SOURCE_AUTO,
+) -> int:
+    """Record *outcome* for each skill in *skills*. Returns the count recorded.
+
+    No-op under the curator's background-review fork so the curator's own turn
+    never fabricates outcomes (mirrors the ``bump_use`` guard). This is the
+    guard the turn finalizer relies on — ``record_outcome`` itself stays
+    unguarded (a direct caller with a real signal should always be able to
+    record it; see tests/test_curator_telemetry_guard.py).
+    """
+    if is_background_review():
+        return 0
+    recorded = 0
+    for name in set(skills or []):
+        if name:
+            record_outcome(name, outcome, source=source)
+            recorded += 1
+    return recorded
 
 
 def mark_agent_created(skill_name: str) -> None:

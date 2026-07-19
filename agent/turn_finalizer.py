@@ -525,6 +525,31 @@ def finalize_turn(
     # handled by the CLI (atexit / /reset) and gateway (session expiry /
     # _reset_session).
 
+    # Skill outcome sensor: record one outcome per skill used this turn.
+    # This is the input end of the self-improving evaluation loop — without
+    # it, skill_scoring only ever sees recency (no success/failure signal).
+    # Turn-level inference attributed to every skill used (source="auto");
+    # record_turn_skill_outcomes no-ops under the curator background-review
+    # fork so the curator's own pass never fabricates outcomes. Best-effort:
+    # never let telemetry break the turn.
+    try:
+        from tools.skill_usage import (
+            get_turn_skills_used,
+            infer_turn_outcome,
+            record_turn_skill_outcomes,
+        )
+        _skills_used = get_turn_skills_used()
+        if _skills_used:
+            _outcome = infer_turn_outcome(
+                interrupted=interrupted,
+                failed=failed,
+                turn_exit_reason=_turn_exit_reason,
+                final_response=final_response,
+            )
+            record_turn_skill_outcomes(_skills_used, _outcome)
+    except Exception as exc:
+        logger.debug("skill outcome recording failed: %s", exc)
+
     # Plugin hook: on_session_end
     # Fired at the very end of every run_conversation call.
     # Plugins can use this for cleanup, flushing buffers, etc.

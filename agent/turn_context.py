@@ -264,6 +264,16 @@ def build_turn_context(
     # NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
     agent.iteration_budget = IterationBudget(agent.max_iterations)
 
+    # Start per-turn skill-use tracking: bump_use() accumulates the skills
+    # loaded/invoked during this turn into a ContextVar-scoped set, which the
+    # turn finalizer reads to record one outcome per skill (the outcome sensor
+    # that feeds skill_scoring). No-op-safe: resets the set every turn.
+    try:
+        from tools.skill_usage import begin_turn_skill_tracking
+        begin_turn_skill_tracking()
+    except Exception:
+        pass
+
     # Log conversation turn start for debugging/observability.
     _preview_text = summarize_user_message_for_log(user_message)
     _msg_preview = (_preview_text[:80] + "...") if len(_preview_text) > 80 else _preview_text
