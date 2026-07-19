@@ -978,6 +978,55 @@ def test_curator_review_prompt_documents_lifecycle_vocabulary():
     assert "replaced_by" in CURATOR_REVIEW_PROMPT
 
 
+def test_curator_review_prompt_prefers_deprecate_over_consolidate():
+    """Deprecate must come BEFORE consolidate paths in the decision rubric
+    so the LLM defaults to deprecate (not delete+absorbed_into) when a
+    better-named umbrella already covers the same domain.
+
+    Pinned by the "Real-LLM verification" follow-up recorded in
+    PROJECT_STATUS.md (C.deferred, 2026-07-19 pass): when a narrow
+    sibling of an existing umbrella is presented, the LLM was reaching
+    for ``consolidations: [{from → umbrella}]`` / delete+absorbed_into
+    instead of ``deprecations: [{replaced_by → umbrella}]``. The fix:
+    reorder the decision rubric so deprecate is path a, split is path b,
+    and the three consolidate paths come after — plus contrast language
+    that explicitly says "deprecate, NOT delete+absorbed_into, when the
+    umbrella already exists and the narrow skill adds no unique
+    content".
+    """
+    from agent.curator import CURATOR_REVIEW_PROMPT
+    # Path ordering: deprecate (a) must appear before merge (c) in the
+    # source string so the LLM sees it first.
+    pos_deprecate = CURATOR_REVIEW_PROMPT.index(
+        'a. DEPRECATE (preferred over consolidate'
+    )
+    pos_split = CURATOR_REVIEW_PROMPT.index(
+        'b. SPLIT (preferred over consolidate'
+    )
+    pos_merge = CURATOR_REVIEW_PROMPT.index(
+        'c. MERGE INTO EXISTING UMBRELLA'
+    )
+    pos_create = CURATOR_REVIEW_PROMPT.index(
+        'd. CREATE A NEW UMBRELLA SKILL.md'
+    )
+    pos_demote = CURATOR_REVIEW_PROMPT.index(
+        'e. DEMOTE TO REFERENCES/TEMPLATES/SCRIPTS'
+    )
+    assert pos_deprecate < pos_split, "deprecate must be path a (before split)"
+    assert pos_split < pos_merge, "split must be path b (before merge)"
+    assert pos_merge < pos_create, "merge must precede create-new-umbrella"
+    assert pos_create < pos_demote, "create-new must precede demote"
+
+    # Contrast language must be present verbatim.
+    assert "Do NOT use action=\"delete\" absorbed_into=<umbrella>" in CURATOR_REVIEW_PROMPT
+    assert "DECISION RULE" in CURATOR_REVIEW_PROMPT
+    # The literal phrase from the follow-up recommendation.
+    assert "umbrella currently lacks" in CURATOR_REVIEW_PROMPT
+    # Five-transitions framing replaces the old "Three ways to consolidate".
+    assert "Five transitions" in CURATOR_REVIEW_PROMPT
+    assert "Three ways to consolidate" not in CURATOR_REVIEW_PROMPT
+
+
 def test_curator_review_prompt_consults_quality_score():
     """Curator must ground split/deprecate decisions in compute_skill_score,
     not raw counters. Mirrors PROJECT_STATUS.md section E (curator prompt
