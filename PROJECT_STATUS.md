@@ -238,28 +238,47 @@ What's still loose:
 ### F — observability dashboard (not in the original report,
 discovered during B-series work)
 
-* `audit_log.jsonl` (curator_hooks) is being written but nothing
-  reads it. A `hermes curator audit --since=...` CLI would let the
-  user see the dry-run block / approve breakdown over time.
-* `skill_usage.json` outcome + feedback counts are written but
-  nothing renders them. A `hermes skill score <name>` CLI would
-  close the human-in-loop half of the feedback loop.
+* ✅ **CLI: `hermes curator audit`** *(done 2026-07-19)* — renders
+  the JSONL log that `agent/curator_hooks.py` writes to
+  `<HERMES_HOME>/logs/curator/audit.jsonl`. Supports
+  `--limit`/`--since`/`--verdict`/`--action`/`--json`. Read-only
+  by construction; pins confirmed by
+  `tests/agent/test_curator.py::test_cli_audit_does_not_mutate_log`.
+* ✅ **CLI: `hermes skill score <name>`** *(done 2026-07-19)* —
+  calls `agent.skill_scoring.compute_skill_score(name)` and prints
+  the score + components + last_outcome / last_rating. New
+  top-level `skill` (singular) command co-existing with the
+  existing `skills` (plural) for registry browsing. Read-only;
+  pins confirmed by
+  `tests/hermes_cli/test_skill_cmd.py::test_cmd_skill_score_does_not_write_to_usage`.
 
 ---
 
 ## 🚀 Recommended next-session entry point
 
-*(Updated 2026-07-19.)* C's prompt integration is now done
-(see section C + C.deferred + the dry-run log above). The
-prompt tells the LLM when to split / deprecate / delete, and
-when to consult `compute_skill_score`. The next most leveraged
-step is **C.deferred — wire the LLM-visible schema** so the
-LLM can actually emit those actions. Until that lands, the new
-prompt paragraphs are inert (the LLM sees the vocabulary in
-the prompt but the schema rejects any matching `skill_manage`
-call).
+*(Updated 2026-07-19, second pass.)* Both C (curator prompt
+integration) and F (observability dashboard) are now done. The
+LLM is told to use `split` / `deprecate` and consult
+`compute_skill_score`; the audit log and score are now
+human-readable via CLI. **Nothing remains in the C or F
+sections** beyond their respective deferred follow-ups.
 
-Concretely, in order:
+The single most leveraged next step is the **C.deferred —
+schema-plumbing block** (5 items, listed in order below). Until
+this lands, the new prompt vocabulary is inert: the LLM sees
+`action="split"` / `action="deprecate"` / `split_into=[...]` /
+`replaced_by=...` in the prompt, but the LLM-visible schema
+rejects those calls and the curator's dry-run guard does not
+recognize the new actions. After C.deferred lands, a real
+`hermes curator run --dry-run` against a populated install
+will actually exercise split/deprecate and the auditor
+(commit `8390566`) will show those verdicts in the audit
+log — closing the loop end-to-end.
+
+### Next task — C.deferred: wire the LLM-visible schema
+
+The 5 items, in execution order (each is a separate checklist
+line in section C.deferred above):
 
 1. `tools/skill_manager_tool.py:1531` — add `"split"` and
    `"deprecate"` to the `SKILL_MANAGE_SCHEMA` action enum.
@@ -275,6 +294,12 @@ Concretely, in order:
    `_classify_removed_skills` / `_reconcile_classification` at
    lines 751-1014 to surface them.
 
+**Status: not started in this turn.** This task is the natural
+entry point for the next session. It is intentionally separate
+from the prompt-integration work that landed earlier today —
+the prompt change is a no-op until these 5 plumbing items are
+in place.
+
 After C.deferred, the natural next move is **D** (CJK tokenizer
 + embedding layer) — longest-running performance work and the
 gating prerequisite for any future skill scaling.
@@ -284,8 +309,19 @@ gating prerequisite for any future skill scaling.
 ## Branch state
 
 All work is on `main` of `feiguang50-hub/hermes-agent`. Last
-status refresh: 2026-07-19. The 13 commits listed above remain
-the project footprint through 2026-07-18; the prompt edit,
-the two new prompt-string tests, and this PROJECT_STATUS.md
-update land as 3 follow-up commits in the same style (one
-focused commit per change, per the project's existing rhythm).
+status refresh: 2026-07-19. Today's commits land as 5 focused
+follow-ups in the project's existing rhythm (one focused
+commit per change):
+
+| Commit | What |
+|--------|------|
+| `4432c9e` | feat(agent/curator): integrate split/deprecate vocabulary + scoring guidance into review prompt |
+| `410d75f` | test(agent/curator): pin split/deprecate + scoring guidance in review prompt |
+| `0687baa` | docs: update PROJECT_STATUS.md (C done, C.deferred added, dry-run log) |
+| `8390566` | feat(hermes-cli/curator): add audit subcommand to render curator_hooks audit log history |
+| `50c948b` | feat(hermes-cli): add hermes skill top-level command with score subcommand |
+| *this commit* | docs: update PROJECT_STATUS.md (F done; C.deferred as next task) |
+
+The next session's work (C.deferred — schema plumbing) is
+listed in the "Recommended next-session entry point" section
+above as 5 distinct checklist items.
