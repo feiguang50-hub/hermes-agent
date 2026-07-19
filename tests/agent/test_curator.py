@@ -958,6 +958,37 @@ def test_curator_review_prompt_offers_support_file_actions():
     assert "action=create" in CURATOR_REVIEW_PROMPT or "create a new umbrella" in CURATOR_REVIEW_PROMPT.lower()
 
 
+def test_curator_review_prompt_documents_lifecycle_vocabulary():
+    """split / deprecate must be first-class in the prompt so the LLM can
+    describe the action it would take, even before the schema wires the
+    call.
+
+    Pinned by the C (curator prompt integration) work item. The LLM-
+    visible schema enum does not yet list these actions, so the LLM
+    cannot legally call them today — but the prompt must use the
+    vocabulary so a future schema fix is immediately exercised.
+    """
+    from agent.curator import CURATOR_REVIEW_PROMPT
+    # The two new skill_manage actions must appear as actionable verbs.
+    assert 'action="split"' in CURATOR_REVIEW_PROMPT
+    assert 'action="deprecate"' in CURATOR_REVIEW_PROMPT
+    # Their required parameters must be named in the prompt so the LLM
+    # knows what to pass.
+    assert "split_into" in CURATOR_REVIEW_PROMPT
+    assert "replaced_by" in CURATOR_REVIEW_PROMPT
+
+
+def test_curator_review_prompt_consults_quality_score():
+    """Curator must ground split/deprecate decisions in compute_skill_score,
+    not raw counters. Mirrors PROJECT_STATUS.md section E (curator prompt
+    rebalance) and is the second half of section C's scoring-aware
+    paragraph.
+    """
+    from agent.curator import CURATOR_REVIEW_PROMPT
+    assert "compute_skill_score" in CURATOR_REVIEW_PROMPT
+    assert "get_record" in CURATOR_REVIEW_PROMPT
+
+
 
 def test_cli_unpin_refuses_bundled_skill(curator_env, capsys):
     """hermes curator unpin must refuse bundled/hub skills too (matches pin)."""
