@@ -364,6 +364,82 @@ consolidate/delete instead, the prompt vocabulary in
 explicit "prefer split when ..." framing). Punted until someone
 has API credentials handy and a populated install to point it at.
 
+**Real-LLM verification (2026-07-19, fourth pass): partial pass.**
+A real `hermes curator run --dry-run --consolidate` was executed
+against 5 real agent-created SKILL.md files using DeepSeek
+(`deepseek-chat` via the `deepseek` provider, configured under
+`auxiliary.curator` in `~/.hermes/config.yaml`). Provider,
+model, and 66.89 s duration are recorded in the resulting
+`run.json`. Raw artefacts:
+
+- `~/.hermes/logs/curator/20260719-054629/run.json`
+- `~/.hermes/logs/curator/20260719-054629/REPORT.md`
+- `~/.hermes/logs/curator/audit.jsonl`
+
+The fixture was designed to give the LLM three categorically
+different decisions to make:
+
+| Skill | Designed-for decision |
+|---|---|
+| `pr-triage-salvage` | **split** — its own SKILL.md says "two flows drifted into one skill" |
+| `anthropic-api-debugging` | **deprecate** — fully redundant with the existing `llm-api-debugging` umbrella |
+| `openai-api-debugging` | **deprecate** — same |
+| `llm-api-debugging` | keep (already the umbrella) |
+| `diagnose-cron-timeout` | keep (no siblings) |
+
+Result counts: `splits_this_run=1, deprecations_this_run=0,
+consolidated_this_run=2, pruned_this_run=0`. What the LLM
+actually decided, and what it tells us:
+
+1. **Split vocabulary IS being used.** `pr-triage-salvage` was
+   split into `[pr-triage, pr-salvage]` in the YAML block, with
+   the rationale *"covers two unrelated workflows (diagnosis
+   vs. cherry-pick salvage)"*. The prompt's split guidance lands
+   for genuinely two-topic skills.
+
+2. **Deprecate vocabulary is NOT being used.** Both
+   `anthropic-api-debugging` and `openai-api-debugging` got
+   `consolidations: [{from → llm-api-debugging}]` in the YAML
+   block instead of `deprecations:`. The LLM chose
+   `delete absorbed_into=<umbrella>` over `deprecate
+   replaced_by=<umbrella>` — even though, semantically, a
+   deprecate would be more accurate (the SKILL.md stays on disk
+   with a pointer to the umbrella, which is exactly what we want
+   when a generic umbrella already supersedes a narrow sibling).
+   This is the gap the original C-section prompt-language gap
+   test was checking for.
+
+3. **Tool-call discipline held.** The LLM emitted zero
+   `skill_manage(action="split"|"deprecate"|"delete")` calls —
+   only read-only `skill_view` × 5, `search_files`, `terminal`,
+   `read_file` of `.usage.json`. Decisions went into the YAML
+   block (`source: "model only"` for the split) rather than the
+   tool-call channel. In dry-run this is correct: the prompt
+   banner says "produce a report only — no skill_manage
+   mutations". In a real `--apply` run we'd expect the model to
+   actually invoke the calls, but that wasn't tested here.
+
+**Conclusion.** The plumbing works end-to-end with real LLM
+output (`d7a081e`), and the LLM does pick up the new vocabulary
+when it fits — at least for the split case. The deprecate case
+needs more prompt guidance. Two concrete follow-ups for whoever
+takes this next:
+
+- Tighten the `CURATOR_REVIEW_PROMPT` language around
+  "deprecate when a better-named umbrella already exists and
+  the narrow skill adds no unique content". Currently the prompt
+  says *"deprecate when a better-named umbrella already covers
+  the same domain"* but the model is still reaching for
+  `consolidate` / `delete` first. The likely fix: explicitly
+  contrast the two ("deprecate, NOT delete+absorbed_into, when
+  the umbrella already exists") and put deprecate ahead of
+  consolidate in the decision rubric.
+- Re-run this fixture against a model that actually invokes the
+  tools (not just the YAML block) to confirm the YAML → tool-call
+  pipeline at full fidelity. A `--apply` run would be the
+  natural test — but it requires backing up the fixture skills
+  first.
+
 ---
 
 ## Branch state
@@ -390,9 +466,9 @@ commit per change), plus an E2E verification script.
 
 The tool-chain E2E verification (`d7a081e`) proves the plumbing
 pathway — hook interception, YAML parsing, reconciliation, report
-generation — works end-to-end against real skill data. Whether
-the LLM in real inference actually emits sensible `split` /
-`deprecate` decisions (instead of falling back to simpler
-`consolidate` / `delete`) is **not** verified by that script and
-is pending a real-credential run. See the "Pending verification"
-note in the C.deferred section above.
+generation — works end-to-end against real skill data. A real
+DeepSeek run (2026-07-19) confirmed the LLM picks up the
+`split` vocabulary end-to-end (`splits_this_run=1`) but defaults
+to `consolidate` over `deprecate` for duplicates of an existing
+umbrella — see the "Real-LLM verification" note in the C.deferred
+section above.
