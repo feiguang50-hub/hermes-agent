@@ -673,6 +673,21 @@ def _load_skill_keywords(skill_name: str) -> List[str]:
             if candidate.is_dir():
                 path = candidate
                 break
+        # Category-nested layout: <skills_dir>/<category>/<skill>/SKILL.md.
+        # The flat lookup above only checks <skills_dir>/<name>, so it misses
+        # every nested skill — which is the real-world norm. Fall back to the
+        # frontmatter-name resolver skill_usage already uses (it rglobs
+        # SKILL.md and matches the `name:` field, handling both layouts).
+        # Without this, nested skills got a name-only keyword set and the
+        # keyword-retention guard was effectively inert on real libraries.
+        if path is None:
+            try:
+                from tools.skill_usage import _find_skill_dir
+                resolved = _find_skill_dir(skill_name)
+                if resolved is not None:
+                    path = resolved
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("_load_skill_keywords: nested lookup failed: %s", e)
     except Exception as e:
         logger.debug("_load_skill_keywords: lookup failed: %s", e)
     return extract_skill_keywords(skill_name, path)
