@@ -617,7 +617,7 @@ def test_dry_run_injects_report_only_banner(curator_env, monkeypatch):
     u.mark_agent_created("a")
 
     captured = {}
-    def _stub(prompt):
+    def _stub(prompt, *, dry_run=False):
         captured["prompt"] = prompt
         return {"final": "", "summary": "s", "model": "", "provider": "",
                 "tool_calls": [], "error": None}
@@ -661,7 +661,7 @@ def test_run_review_synchronous_invokes_llm_stub(curator_env, monkeypatch):
     u.mark_agent_created("a")
 
     calls = []
-    def _stub(prompt):
+    def _stub(prompt, *, dry_run=False):
         calls.append(prompt)
         return {
             "final": "stubbed-summary",
@@ -755,7 +755,7 @@ def test_run_review_consolidate_override_runs_llm(curator_env, monkeypatch):
     calls = []
     monkeypatch.setattr(
         c, "_run_llm_review",
-        lambda prompt: (calls.append(prompt), {
+        lambda prompt, *, dry_run=False: (calls.append(prompt), {
             "final": "", "summary": "s", "model": "", "provider": "",
             "tool_calls": [], "error": None,
         })[1],
