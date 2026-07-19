@@ -397,19 +397,28 @@ def test_parse_structured_summary_happy_path(curator_env):
 
 def test_parse_structured_summary_missing_block(curator_env):
     out = curator_env._parse_structured_summary("No block in this text.")
-    assert out == {"consolidations": [], "prunings": []}
+    assert out == {
+        "consolidations": [], "prunings": [],
+        "splits": [], "deprecations": [],
+    }
 
 
 def test_parse_structured_summary_malformed_yaml(curator_env):
     text = "```yaml\nthis: is\n  not: [valid yaml\n```"
     out = curator_env._parse_structured_summary(text)
-    assert out == {"consolidations": [], "prunings": []}
+    assert out == {
+        "consolidations": [], "prunings": [],
+        "splits": [], "deprecations": [],
+    }
 
 
 def test_parse_structured_summary_empty_lists(curator_env):
-    text = "```yaml\nconsolidations: []\nprunings: []\n```"
+    text = "```yaml\nconsolidations: []\nprunings: []\nsplits: []\ndeprecations: []\n```"
     out = curator_env._parse_structured_summary(text)
-    assert out == {"consolidations": [], "prunings": []}
+    assert out == {
+        "consolidations": [], "prunings": [],
+        "splits": [], "deprecations": [],
+    }
 
 
 def test_parse_structured_summary_ignores_bare_strings(curator_env):
@@ -1123,3 +1132,284 @@ def test_rename_summary_pin_hint_picks_one_umbrella_when_multiple_absorbed(curat
     # Exactly one hint line, not one per umbrella.
     pin_lines = [ln for ln in result.splitlines() if "hermes curator pin" in ln]
     assert len(pin_lines) == 1
+
+
+# ---------------------------------------------------------------------------
+# C.deferred — splits / deprecations make the prompt vocabulary LLM-callable
+# ---------------------------------------------------------------------------
+
+
+def test_parse_structured_summary_extracts_splits(curator_env):
+    """YAML `splits:` list becomes a list of {name, into, reason} dicts."""
+    text = (
+        "## Structured summary (required)\n"
+        "```yaml\n"
+        "consolidations: []\n"
+        "prunings: []\n"
+        "splits:\n"
+        "  - name: video-encoding\n"
+        "    into: [h264-encoding, audio-encoding]\n"
+        "    reason: covers two unrelated codecs\n"
+        "deprecations: []\n"
+        "```\n"
+    )
+    out = curator_env._parse_structured_summary(text)
+    assert len(out["splits"]) == 1
+    assert out["splits"][0] == {
+        "name": "video-encoding",
+        "into": ["h264-encoding", "audio-encoding"],
+        "reason": "covers two unrelated codecs",
+    }
+
+
+def test_parse_structured_summary_extracts_deprecations(curator_env):
+    """YAML `deprecations:` list becomes a list of {name, replaced_by, reason}."""
+    text = (
+        "## Structured summary (required)\n"
+        "```yaml\n"
+        "consolidations: []\n"
+        "prunings: []\n"
+        "splits: []\n"
+        "deprecations:\n"
+        "  - name: anthropic-api-debugging\n"
+        "    replaced_by: llm-api-debugging\n"
+        "    reason: better umbrella name covers the same domain\n"
+        "```\n"
+    )
+    out = curator_env._parse_structured_summary(text)
+    assert len(out["deprecations"]) == 1
+    assert out["deprecations"][0] == {
+        "name": "anthropic-api-debugging",
+        "replaced_by": "llm-api-debugging",
+        "reason": "better umbrella name covers the same domain",
+    }
+
+
+def test_parse_structured_summary_split_into_must_be_list(curator_env):
+    """`into` field that isn't a list of non-empty strings is dropped."""
+    text = (
+        "```yaml\n"
+        "splits:\n"
+        "  - name: bad-skill\n"
+        "    into: 'single-string-not-a-list'\n"
+        "  - name: good-skill\n"
+        "    into: [ok-skill]\n"
+        "```"
+    )
+    out = curator_env._parse_structured_summary(text)
+    # Only the well-formed entry survives.
+    assert len(out["splits"]) == 1
+    assert out["splits"][0]["name"] == "good-skill"
+
+
+def test_parse_structured_summary_deprecation_requires_replaced_by(curator_env):
+    """Entries without a non-empty `replaced_by` are dropped."""
+    text = (
+        "```yaml\n"
+        "deprecations:\n"
+        "  - name: orphan-skill\n"
+        "  - name: complete\n"
+        "    replaced_by: umbrella\n"
+        "```"
+    )
+    out = curator_env._parse_structured_summary(text)
+    assert len(out["deprecations"]) == 1
+    assert out["deprecations"][0]["name"] == "complete"
+
+
+def test_extract_lifecycle_picks_up_split_call(curator_env):
+    """`skill_manage action=split` with split_into=[...] is recorded."""
+    decls = curator_env._extract_lifecycle_declarations([
+        {
+            "name": "skill_manage",
+            "arguments": json.dumps({
+                "action": "split",
+                "name": "video-encoding",
+                "split_into": ["h264-encoding", "audio-encoding"],
+            }),
+        },
+    ])
+    assert decls["splits"] == [{
+        "name": "video-encoding",
+        "into": ["h264-encoding", "audio-encoding"],
+        "reason": "",
+    }]
+    assert decls["deprecations"] == []
+
+
+def test_extract_lifecycle_picks_up_deprecate_call(curator_env):
+    """`skill_manage action=deprecate` with replaced_by is recorded."""
+    decls = curator_env._extract_lifecycle_declarations([
+        {
+            "name": "skill_manage",
+            "arguments": json.dumps({
+                "action": "deprecate",
+                "name": "anthropic-api-debugging",
+                "replaced_by": "llm-api-debugging",
+            }),
+        },
+    ])
+    assert decls["deprecations"] == [{
+        "name": "anthropic-api-debugging",
+        "replaced_by": "llm-api-debugging",
+        "reason": "",
+    }]
+    assert decls["splits"] == []
+
+
+def test_extract_lifecycle_skips_invalid_calls(curator_env):
+    """split without split_into, deprecate without replaced_by: both skipped."""
+    decls = curator_env._extract_lifecycle_declarations([
+        {"name": "skill_manage", "arguments": json.dumps({
+            "action": "split", "name": "no-list",
+        })},
+        {"name": "skill_manage", "arguments": json.dumps({
+            "action": "deprecate", "name": "no-target",
+        })},
+    ])
+    assert decls == {"splits": [], "deprecations": []}
+
+
+def test_reconcile_lifecycle_tool_call_wins_over_yaml(curator_env):
+    """Tool-call declarations are authoritative; YAML reason grafted on."""
+    lifecycle_decls = {
+        "splits": [{"name": "video-encoding", "into": ["a", "b"], "reason": ""}],
+        "deprecations": [{"name": "old-skill", "replaced_by": "new-skill", "reason": ""}],
+    }
+    model_block = {
+        "consolidations": [], "prunings": [],
+        "splits": [{"name": "video-encoding", "into": ["a", "b"],
+                    "reason": "covers two codecs"}],
+        "deprecations": [{"name": "old-skill", "replaced_by": "new-skill",
+                          "reason": "better-named umbrella"}],
+    }
+    out = curator_env._reconcile_lifecycle(lifecycle_decls, model_block)
+    assert out["splits"][0]["source"] == "model+audit"
+    assert out["splits"][0]["reason"] == "covers two codecs"
+    assert out["deprecations"][0]["source"] == "model+audit"
+    assert out["deprecations"][0]["reason"] == "better-named umbrella"
+
+
+def test_reconcile_lifecycle_tool_only_audit_source(curator_env):
+    """Tool-call declaration without YAML entry surfaces as audit source."""
+    out = curator_env._reconcile_lifecycle(
+        {"splits": [{"name": "tool-only", "into": ["a"], "reason": ""}],
+         "deprecations": []},
+        {"consolidations": [], "prunings": [], "splits": [], "deprecations": []},
+    )
+    assert out["splits"][0]["source"] == "tool-call audit"
+    assert out["splits"][0]["reason"] == ""
+
+
+def test_reconcile_lifecycle_model_only_source(curator_env):
+    """YAML entry with no tool call surfaces as model-only (missing in audit)."""
+    out = curator_env._reconcile_lifecycle(
+        {"splits": [], "deprecations": []},
+        {"consolidations": [], "prunings": [],
+         "splits": [{"name": "yaml-only", "into": ["a"], "reason": "r"}],
+         "deprecations": []},
+    )
+    assert out["splits"][0]["source"] == "model only"
+    assert out["splits"][0]["reason"] == "r"
+
+
+def test_build_rename_summary_includes_split_line(curator_env):
+    """A skill_manage(action='split') tool call surfaces in the summary."""
+    result = curator_env._build_rename_summary(
+        before_names={"video-encoding"},
+        after_report=[
+            {"name": "video-encoding", "state": "split", "pinned": False},
+            {"name": "h264-encoding", "state": "active", "pinned": False},
+            {"name": "audio-encoding", "state": "active", "pinned": False},
+        ],
+        tool_calls=[
+            {"name": "skill_manage",
+             "arguments": json.dumps({
+                 "action": "split",
+                 "name": "video-encoding",
+                 "split_into": ["h264-encoding", "audio-encoding"],
+             })},
+        ],
+        model_final="",
+    )
+    assert "lifecycle flips" in result
+    assert "video-encoding — split into [h264-encoding, audio-encoding]" in result
+
+
+def test_build_rename_summary_includes_deprecation_line(curator_env):
+    """A skill_manage(action='deprecate') tool call surfaces in the summary."""
+    result = curator_env._build_rename_summary(
+        before_names={"old-skill"},
+        after_report=[{"name": "old-skill", "state": "deprecated", "pinned": False}],
+        tool_calls=[
+            {"name": "skill_manage",
+             "arguments": json.dumps({
+                 "action": "deprecate",
+                 "name": "old-skill",
+                 "replaced_by": "new-umbrella",
+             })},
+        ],
+        model_final="",
+    )
+    assert "lifecycle flips" in result
+    assert "old-skill — deprecated, see new-umbrella" in result
+
+
+def test_build_rename_summary_no_activity_returns_empty(curator_env):
+    """No removed skills + no lifecycle flips → empty string (caller gates on this)."""
+    result = curator_env._build_rename_summary(
+        before_names={"only-skill"},
+        after_report=[{"name": "only-skill", "state": "active", "pinned": False}],
+        tool_calls=[],
+        model_final="",
+    )
+    assert result == ""
+
+
+# SKILL_MANAGE_SCHEMA — ensure the LLM-visible schema accepts the new actions
+# -----------------------------------------------------------------------------
+
+
+def test_skill_manage_schema_includes_split_and_deprecate():
+    """The LLM-visible schema enum must list split/deprecate."""
+    from tools.skill_manager_tool import SKILL_MANAGE_SCHEMA
+    enum = SKILL_MANAGE_SCHEMA["parameters"]["properties"]["action"]["enum"]
+    assert "split" in enum
+    assert "deprecate" in enum
+
+
+def test_skill_manage_schema_declares_split_into_and_replaced_by():
+    """The schema parameters must declare the new fields."""
+    from tools.skill_manager_tool import SKILL_MANAGE_SCHEMA
+    props = SKILL_MANAGE_SCHEMA["parameters"]["properties"]
+    assert "split_into" in props
+    assert props["split_into"]["type"] == "array"
+    assert "replaced_by" in props
+    assert props["replaced_by"]["type"] == "string"
+
+
+# curator_hooks._MUTATING_ACTIONS — ensure dry-run guard sees the new actions
+# -----------------------------------------------------------------------------
+
+
+def test_mutating_actions_includes_split_and_deprecate():
+    """_MUTATING_ACTIONS must include split and deprecate so the dry-run
+    guard / keyword-retention check recognise them."""
+    from agent.curator_hooks import _MUTATING_ACTIONS
+    assert "split" in _MUTATING_ACTIONS
+    assert "deprecate" in _MUTATING_ACTIONS
+
+
+# Curator prompt — pin that the YAML schema advertised to the LLM matches
+# -----------------------------------------------------------------------------
+
+
+def test_curator_prompt_advertises_split_and_deprecate_lists():
+    """The `## Structured summary (required)` block must list splits: and
+    deprecations: so the LLM emits them when it makes those calls."""
+    from agent.curator import CURATOR_REVIEW_PROMPT
+    assert "splits:" in CURATOR_REVIEW_PROMPT
+    assert "deprecations:" in CURATOR_REVIEW_PROMPT
+    # And the action vocabulary it instructs the LLM to use.
+    assert 'action="split"' in CURATOR_REVIEW_PROMPT
+    assert 'action="deprecate"' in CURATOR_REVIEW_PROMPT
