@@ -323,14 +323,55 @@ populated install will now exercise split/deprecate end-to-end,
 and the audit log (commit `8390566`) will show those verdicts
 — closing the loop.
 
+**Tool-chain E2E verification (2026-07-19): done.** The plumbing
+pathway was exercised end-to-end against real skill data — see
+`tests/e2e_test_curator_split_deprecate_dryrun.py` (commit
+`d7a081e`). The script writes three real agent-created SKILL.md
+files to a tmp `HERMES_HOME`, simulates an LLM emitting one
+`split` call and one `deprecate` call (plus the matching YAML
+block), and asserts every layer in the chain produced the right
+output:
+
+1. `audit.jsonl` shows two `verdict=block_dry_run` entries with the
+   curator-guard message and full scrubbed args.
+2. `run.json` has `counts.splits_this_run=1`,
+   `counts.deprecations_this_run=1`, and full `splits[]` /
+   `deprecations[]` arrays with `source="model+audit"` (tool-call
+   declaration + YAML reason grafted on).
+3. `REPORT.md` renders dedicated `Split into replacement skills`
+   and `Deprecated — superseded by umbrella` sections, plus the
+   new lines in the LLM pass numbers block.
+4. Skill state on disk is unchanged — dry-run correctly blocked
+   the writes.
+
+**⚠️ Pending verification (not blocking, lower priority): the LLM
+decision itself.** What is verified above is the *tool chain* —
+given a scripted response that already uses split / deprecate, the
+curator plumbing processes it correctly end-to-end. What is **not**
+yet verified is whether the LLM, when handed the new prompt in a
+real `hermes curator run --dry-run`, actually emits sensible
+`split` / `deprecate` decisions in its structured summary — and
+in particular, whether it prefers them over the simpler
+`consolidation` / `delete` (absorb into a single umbrella) when
+both would apply. The E2E script can't answer that without real
+LLM credentials. To verify: run `hermes curator run --dry-run
+--consolidate` against a populated install with several skills
+that present split-vs-consolidate ambiguity, and check the
+resulting `REPORT.md` for non-zero `splits_this_run` /
+`deprecations_this_run` counts. If the LLM defaults to
+consolidate/delete instead, the prompt vocabulary in
+`CURATOR_REVIEW_PROMPT` needs more guidance (probably more
+explicit "prefer split when ..." framing). Punted until someone
+has API credentials handy and a populated install to point it at.
+
 ---
 
 ## Branch state
 
 All work is on `main` of `feiguang50-hub/hermes-agent`. Last
-status refresh: 2026-07-19. Today's commits land as 5 focused
-follow-ups in the project's existing rhythm (one focused
-commit per change):
+status refresh: 2026-07-19. C.deferred schema plumbing landed as
+5 focused follow-ups in the project's existing rhythm (one focused
+commit per change), plus an E2E verification script.
 
 | Commit | What |
 |--------|------|
@@ -339,9 +380,19 @@ commit per change):
 | `0687baa` | docs: update PROJECT_STATUS.md (C done, C.deferred added, dry-run log) |
 | `8390566` | feat(hermes-cli/curator): add audit subcommand to render curator_hooks audit log history |
 | `50c948b` | feat(hermes-cli): add hermes skill top-level command with score subcommand |
-| *this commit* | docs: update PROJECT_STATUS.md (F done; C.deferred as next task) |
-| *follow-ups* | C.deferred schema-plumbing: schema enum + parameters + handler forwarding; `_MUTATING_ACTIONS`; YAML splits:/deprecations: + parser + reconciler + report |
+| `f7ea70d` | feat(tools/skill-manager): wire split and deprecate through schema (C.deferred #1+#2+#3) |
+| `5b78b9b` | fix(agent/curator-hooks): extend mutating actions to split and deprecate (C.deferred #4) |
+| `0d81bb7` | feat(agent/curator): surface split and deprecate in structured summary (C.deferred #5) |
+| `f71e918` | test: pin C.deferred schema-plumbing (17 focused tests) |
+| `66ddcaa` | docs: update PROJECT_STATUS.md — C.deferred done |
+| `d7a081e` | test(e2e): curator split/deprecate dry-run end-to-end verification |
+| *this commit* | docs: update PROJECT_STATUS.md — E2E verification logged; LLM-inference verification deferred (needs real credentials) |
 
-The next session's work (C.deferred — schema plumbing) is
-listed in the "Recommended next-session entry point" section
-above as 5 distinct checklist items.
+The tool-chain E2E verification (`d7a081e`) proves the plumbing
+pathway — hook interception, YAML parsing, reconciliation, report
+generation — works end-to-end against real skill data. Whether
+the LLM in real inference actually emits sensible `split` /
+`deprecate` decisions (instead of falling back to simpler
+`consolidate` / `delete`) is **not** verified by that script and
+is pending a real-credential run. See the "Pending verification"
+note in the C.deferred section above.
