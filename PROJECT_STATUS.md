@@ -543,13 +543,176 @@ this model. The companion follow-up at lines 437–441 (a `--apply`
 run that exercises the YAML → tool-call channel) is **not**
 satisfied by this pass and remains open.
 
+**Real-LLM verification (2026-07-19, sixth pass — boundary fixtures,
+`deepseek-chat`): the rubric holds on the no-umbrella case but misroutes
+on the 2-bullet-preamble case and under-acts on the real-paragraph case.**
+
+Three new fixtures were designed to test boundary conditions where the
+deprecate-vs-merge call isn't obvious — i.e. *closer to real-world*
+than the previous hand-crafted fixture set, where the umbrella
+strictly contained the siblings. Each fixture was run against a fresh,
+isolated `HERMES_HOME` (temp dir under `_boundary_run/`) carrying
+only the fixture's three SKILL.md files plus a `config.yaml` with
+the `auxiliary.curator: deepseek/deepseek-chat` slot. Same model,
+same default temperature. Wall-clock: ~30 s per fixture.
+
+**Fixture A — *trivial preamble only*.**
+Sibling `postgres-connection-pooling-heroku` has 2 short bullets of
+Heroku-specific content (Heroku's `DATABASE_URL` parsing; managed
+pgBouncer forcing transaction mode) plus an explicit self-cue that
+everything else is shared with the umbrella
+`postgres-connection-pooling`. The sibling skill's own body even says
+"The two bullets above are the only Heroku-specific lines; everything
+else is shared." A sentinel `diagnose-cron-timeout-v2` is kept
+isolated.
+
+- **Designed-for:** `deprecate replaced_by=postgres-connection-pooling`
+  (the 2 bullets are not a unique paragraph; they're a labelled
+  subsection candidate at most).
+- **LLM actually did:** `consolidations: [{from: postgres-connection-
+  pooling-heroku, into: postgres-connection-pooling, reason: ...}]`.
+- **LLM rationale (verbatim):** *"Heroku-specific content is 2 bullets
+  that belong as a labeled subsection under the existing provider-
+  agnostic umbrella; the sibling skill's own body says everything
+  else is shared."*
+- **Read:** **rubric misroutes**. The LLM read "2 bullets" as
+  *paragraph* (path c, MERGE) instead of *trivial preamble* (path a,
+  DEPRECATE). The DECISION RULE question *"does the narrow skill
+  have a unique paragraph, example, or template the umbrella currently
+  lacks?"* is too permissive: 2 bullets of unique content is enough
+  to flip the LLM into path c. **Suggested rubric tweak (not yet
+  applied):** add an explicit "even if 1–2 short bullets are unique,
+  prefer path a" line to the DECISION RULE, or rephrase "paragraph"
+  to "substantial paragraph (> ~5 lines of body text)".
+
+**Fixture B — *real unique paragraph + template pointer*.**
+Sibling `github-actions-concurrency` has a YAML config snippet
+(concurrency groups), explicit branching rules (production deploys
+must set `cancel-in-progress: false`), and a pointer to a sister
+file `templates/concurrency-cancel-warning.yml`. The umbrella
+`github-actions-debugging` covers 5 troubleshooting categories but
+says nothing about concurrency. Sentinel `hermes-doctor-cache-check`
+kept isolated.
+
+- **Designed-for:** `path c — MERGE INTO EXISTING UMBRELLA` (real
+  unique content: paragraph + snippet + sibling-file ref).
+- **LLM actually did:** *kept all three*. No entries in any YAML
+  list. Empty `consolidations:` / `splits:` / `deprecations:` /
+  `prunings:`.
+- **LLM rationale (verbatim):** *"Both skills relate to GitHub Actions
+  but cover **orthogonal concerns**: [concurrency] is a config template;
+  [debugging] is a troubleshooting catalog. … Merging them into one
+  `github-actions` umbrella would create a skill with no single clear
+  trigger — too broad. … This would violate the rule: a human maintainer
+  would keep these as two separate reference cards, not one document
+  with disjoint sections."*
+- **Read:** **rubric under-acts**. The LLM ignored paths c/e entirely
+  and reached for "keep" (a legitimate decision per the prompt's
+  *"'keep' is a legitimate decision ONLY when…"* clause, but the
+  qualifier — "the skill is already a class-level umbrella **and**
+  none of the proposed merges would improve discoverability" — does
+  not apply here). The LLM also noticed that the concurrency skill's
+  referenced template file *"doesn't exist yet"* and used that as
+  additional keep-justification. **A second-prompt rubric tweak
+  candidate:** tighten the "keep" qualifier to forbid keep-when-
+  there's-a-known-overlap-sibling, and surface a "broken cross-
+  reference detected" warning so the LLM doesn't use that as an
+  excuse to defer.
+
+**Fixture C — *two equal-width siblings, no umbrella exists*.**
+Two skills `redis-rate-limit-fixed-window` and
+`redis-rate-limit-sliding-window`, each ~6 lines plus a Lua snippet
+(one uses `INCR`+`EXPIRE`; the other uses sorted-set
+`ZREMRANGEBYSCORE`+`ZCARD`+`ZADD`). Neither is broader than the
+other. Sentinel `loose-style-config-error` kept isolated.
+
+- **Designed-for:** `keep both` (no umbrella exists; deprecate doesn't
+  apply); possibly create a new umbrella later.
+- **LLM actually did:**
+  `consolidations: [{from: redis-rate-limit-fixed-window, into: redis-rate-limit},
+                    {from: redis-rate-limit-sliding-window, into: redis-rate-limit}]`
+  plus `kept: [loose-style-config-error]`.
+- **LLM rationale (verbatim):** *"Narrow sibling of sliding-window
+  skill; both are two implementations of the same class-level 'Redis
+  rate limiting' concern, now under a single labeled umbrella."*
+- **Read:** **rubric holds, expressed oddly.** The LLM correctly
+  recognised "no umbrella exists" and proposed creating one
+  (`redis-rate-limit`) to absorb both siblings — that's path d
+  (CREATE A NEW UMBRELLA SKILL.md). But the YAML uses
+  `consolidations: [...]` with `into: <new-umbrella-name>` rather
+  than introducing a separate `created:` section. The curator's
+  reconciliation then has nothing to translate, so neither skill
+  appears in `run.json`. End result on disk (under `--apply`) would
+  be: a new `redis-rate-limit/SKILL.md` created, both siblings
+  archived. That's *behaviourally* path d. The schema convention is
+  mismatched, though — a future schema-cleanup item.
+
+**Aggregate (fifth pass + sixth pass).**
+
+Combining all 8 fixtures the curator has been run against under
+`deepseek-chat`:
+
+| Fixture | Designed rubric path | LLM did | Verdict |
+|---|---|---|---|
+| 5-designed: `pr-triage-salvage` | split | split | ✓ exact |
+| 5-designed: `anthropic-api-debugging` | deprecate | deprecate | ✓ exact |
+| 5-designed: `openai-api-debugging` | deprecate | deprecate | ✓ exact |
+| 5-designed: `llm-api-debugging` | keep | (implicit keep) | ✓ exact |
+| 5-designed: `diagnose-cron-timeout` | keep | (implicit keep) | ✓ exact |
+| Boundary A: `postgres-connection-pooling-heroku` | deprecate | consolidate | ✗ misroutes (path a → c) |
+| Boundary B: `github-actions-concurrency` | merge (path c) | keep | ✗ under-acts (path c → keep) |
+| Boundary C: `redis-rate-limit-{fixed,sliding}-window` | keep both | consolidate both into new `redis-rate-limit` | ≈ schema-mismatched path d |
+
+Counted strictly, **5/8 exact rubric matches, 1/8 ≈-correct
+(semantic path d), 2/8 rubric failures**. Counted leniently
+(semantic-correct = pass), **6/8 pass**. The two failures go in
+opposite directions:
+
+- Fixture A — the LLM is **too eager to merge** when there's any
+  unique content at all.
+- Fixture B — the LLM is **too eager to keep** when the two
+  skills' content is shaped differently (config template vs
+  catalog).
+
+This is a "two tails" picture: the prompt steers the LLM in the
+middle but doesn't pin down the boundary calls. Both failures
+*would have been caught by the new DECISION RULE if it were
+sharper at the 2-bullet end and at the orthogonal-shapes end.*
+
+**`--apply` recommendation (with the failure mode above).** Two
+related tests would close out the rubric evaluation:
+
+1. **Constrained `--apply` against the original 5-fixture set** (the
+   one where the LLM got all 5 correct). This would exercise the
+   YAML → tool-call → audit-log → mutate-disk path end-to-end with
+   the *deprecate* vocabulary the rubric is supposed to teach.
+   Expected on-disk mutations: small, recoverable from the
+   `.archive/` subtree. **Risk: low.**
+2. **`--apply` against any boundary-fixture that misroutes.** Less
+   informative because the LLM still issues *some* call (e.g.
+   Fixture A's `delete absorbed_into=<umbrella>` — the umbrella
+   already absorbs the trivial preamble, so the audit log shows one
+   `block_dry_run` and one real write). **Risk: medium** —
+   `boundary_c_no_umbrella` would *create a new
+   `redis-rate-limit/SKILL.md`* and *archive both siblings* on
+   disk if the LLM's `into: redis-rate-limit` were a real target.
+   That mutation is hard to revert without restoring from the
+   pre-apply snapshot.
+
+**Recommended next step: option 1 only.** Defer option 2 until the
+two rubric failures (Fixtures A and B) are fixed at the prompt
+level — at that point a follow-up dry-run on identical fixtures
+should land them on the designed paths before any `--apply` write
+is risked.
+
 Branch state additions:
 
 | Commit | What |
 |--------|------|
 | `ac2f8f0` | feat(agent/curator): put deprecate ahead of consolidate in lifecycle rubric |
 | `34b293a` | test(agent/curator): pin deprecate-ahead-of-consolidate ordering |
-| *this commit* | docs: record post-rubric real-LLM verification (deprecate-first prompt lands the designed decision on the designed fixture) |
+| `a779001` | docs: record post-rubric real-LLM verification (deprecate-first prompt lands the designed decision on the designed fixture) |
+| *this commit* | docs: record boundary-fixtures real-LLM verification (rubric holds on no-umbrella, misroutes on 2-bullet preamble, under-acts on real-paragraph) |
 
 ---
 
