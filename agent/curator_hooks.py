@@ -50,7 +50,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_RETENTION_THRESHOLD = 0.5
 
 # Actions that mutate a skill's content or existence. Non-mutating actions
-# (view, list) are not gated.
+# (view, list) are not gated. This MUST stay in sync with the mutating
+# actions in ``SKILL_MANAGE_SCHEMA`` (tools/skill_manager_tool.py) — any
+# mutating action missing here silently bypasses BOTH the dry-run block and
+# the keyword-retention check.
+#
+# `edit` replaces the whole SKILL.md body and `remove_file` deletes an
+# auxiliary file; both mutate and must be gated like `patch` / `write_file`.
+# Omitting them let a curator route around the guard with
+# `skill_manage action="edit"` (full-body rewrite) or `action="remove_file"`.
 #
 # `split` and `deprecate` flip a skill's lifecycle state (hidden from
 # routing, possibly with a pointer to a replacement) without touching the
@@ -59,7 +67,8 @@ DEFAULT_RETENTION_THRESHOLD = 0.5
 # otherwise route around the dry-run guard by recording a split without
 # ever touching files.
 _MUTATING_ACTIONS = frozenset({
-    "patch", "create", "write_file", "delete", "split", "deprecate",
+    "patch", "create", "edit", "write_file", "remove_file",
+    "delete", "split", "deprecate",
 })
 
 # Argument fields where the LLM puts the new skill text. These are the
