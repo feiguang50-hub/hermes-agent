@@ -105,21 +105,97 @@ B6 added the **schema** and the **primitive actions**
 `skill_manage action="split"` / `"deprecate"`). What's missing for
 the lifecycle state machine to be useful:
 
-* **Curator prompt integration** — the `CURATOR_REVIEW_PROMPT` in
-  `agent/curator.py` still doesn't tell the LLM when to use
-  `split` vs `deprecate` vs `delete` vs `patch` vs `create`.
-* **Decision criteria** — when should the curator choose split
-  over deprecate? When one skill covers two unrelated domains
-  (split). When a better-named umbrella exists (deprecate +
-  `replaced_by`). Today the LLM has no rubric.
-* **Re-decomposition assist** — when splitting, the LLM should
+* ✅ **Curator prompt integration** *(done 2026-07-19)* — added a
+  new sub-bullet `3d` inside the "How to work" section of
+  `CURATOR_REVIEW_PROMPT` (`agent/curator.py` around line 508)
+  with the four-outcome vocabulary: archive (delete) vs
+  `skill_manage action="split"` with `split_into=[...]` (skill
+  covers two unrelated domains) vs `skill_manage
+  action="deprecate"` with `replaced_by=...` (superseded by a
+  better-named umbrella) vs keep. Pinned by
+  `tests/agent/test_curator.py::test_curator_review_prompt_documents_lifecycle_vocabulary`.
+* ✅ **Decision criteria** *(done 2026-07-19)* — the same
+  paragraph encodes the rubric: split when two unrelated jobs;
+  deprecate when a better-named umbrella already covers the
+  same domain; delete only when content is genuinely obsolete
+  or fully absorbed; never archive purely on a low `use_count`.
+* ✅ **Scoring-aware decision grounding** *(done 2026-07-19,
+  bonus from section E)* — added a "Quality grounding" paragraph
+  before "Expected output" instructing the curator to consult
+  `tools.skill_usage.get_record(name)` and
+  `agent.skill_scoring.compute_skill_score(name)` before any
+  split / deprecate / archive decision, with concrete thresholds
+  (`success_rate < 0.5` or `feedback_score < 0.5` is a strong
+  candidate). Pinned by
+  `tests/agent/test_curator.py::test_curator_review_prompt_consults_quality_score`.
+* ⏳ **Re-decomposition assist** — when splitting, the LLM should
   sketch the replacement SKILL.md content (or at least the
   proposed names + descriptions) before flipping the original to
   `split`. Currently `split` is a metadata-only action; the
   caller is expected to have created the replacements out of band.
-* **`hermes skill status` CLI surface** — there's no way for a
+* ⏳ **`hermes skill status` CLI surface** — there's no way for a
   human to ask "which skills are split / deprecated and what do
   they point at?" without grepping `~/.hermes/skills/.usage.json`.
+
+#### C.deferred — make split / deprecate LLM-callable
+
+The prompt now tells the LLM to call `skill_manage
+action="split"` and `action="deprecate"`, but **the LLM cannot
+legally call them today**. Four specific gaps block the loop:
+
+* ⏳ **`SKILL_MANAGE_SCHEMA` enum** at
+  `tools/skill_manager_tool.py:1531` lists only
+  `["create", "patch", "edit", "delete", "write_file",
+  "remove_file"]`. Adding `"split"` and `"deprecate"` to this
+  enum is the prerequisite for the LLM to even propose the call.
+* ⏳ **`SKILL_MANAGE_SCHEMA` parameters** dict at
+  `tools/skill_manager_tool.py:1532-1605` does not declare
+  `split_into: list` or `replaced_by: string`. Even with the
+  enum fix, the schema validator would silently drop or reject
+  these arguments.
+* ⏳ **Registry handler forwarding** at
+  `tools/skill_manager_tool.py:1612-1628` only forwards
+  `absorbed_into`; `split_into` and `replaced_by` would need to
+  be added to the lambda's argument extraction so the dispatcher
+  actually receives them.
+* ⏳ **`_MUTATING_ACTIONS` blocklist** at
+  `agent/curator_hooks.py:54` is the set
+  `{"patch", "create", "write_file", "delete"}`. Until `split`
+  and `deprecate` are added, the curator's dry-run guard and
+  keyword-retention check won't see these new actions.
+* ⏳ **Structured YAML output schema** at
+  `agent/curator.py` (the `## Structured summary (required)`
+  block) declares only `consolidations:` and `prunings:` lists.
+  Adding `splits:` and `deprecations:` lists (and updating
+  `_parse_structured_summary` / `_classify_removed_skills` /
+  `_reconcile_classification` at lines 751-1014) is needed for
+  downstream tooling to see the new categories distinctly from
+  the existing two.
+
+**Dry-run log — 2026-07-19.** Verified the prompt-assembly
+side of C end-to-end by stubbing `_run_llm_review` to capture
+the prompt string that would be sent to the model, then
+asserting the new vocabulary reaches the wire. Stub input: 3
+sample agent-managed skills (`pr-triage-salvage`,
+`diagnose-cron-timeout`, `anthropic-api-debugging`) in a tmp
+HERMES_HOME; `consolidate=True, dry_run=True`. Captured
+prompt: 12 419 chars. Vocabulary checks (all 8 passed):
+`action="split"` ✓, `action="deprecate"` ✓, `split_into` ✓,
+`replaced_by` ✓, `compute_skill_score` ✓, `get_record` ✓,
+`Quality grounding` header ✓, `SPLIT or DEPRECATE` header ✓.
+Both new paragraphs appeared in the expected positions (3d
+inside item 3 of "How to work"; "Quality grounding" before
+"Expected output").
+
+**Caveat.** This was a prompt-assembly verification, not a
+real LLM call. No live model was queried. Whether the LLM,
+when handed the new prompt, actually emits sensible
+split/deprecate decisions in its structured summary — and
+whether it emits them in the existing `consolidations:` /
+`prunings:` lists (since the new lists don't exist yet) — is
+still unverified. That requires a real `hermes curator run
+--dry-run` against a populated install with LLM credentials,
+which is out of scope for this turn.
 
 ### D — Skill retrieval layer
 
@@ -173,39 +249,43 @@ discovered during B-series work)
 
 ## 🚀 Recommended next-session entry point
 
-The most leveraged thing to do next is **C** (curator prompt
-integration for SPLIT / DEPRECATE). The infrastructure from B6 is
-in place but it's dormant until the curator actually emits those
-actions; without the prompt update, B6 is just schema work that
-nothing exercises.
+*(Updated 2026-07-19.)* C's prompt integration is now done
+(see section C + C.deferred + the dry-run log above). The
+prompt tells the LLM when to split / deprecate / delete, and
+when to consult `compute_skill_score`. The next most leveraged
+step is **C.deferred — wire the LLM-visible schema** so the
+LLM can actually emit those actions. Until that lands, the new
+prompt paragraphs are inert (the LLM sees the vocabulary in
+the prompt but the schema rejects any matching `skill_manage`
+call).
 
-Concretely:
+Concretely, in order:
 
-1. Open `agent/curator.py` and find `CURATOR_REVIEW_PROMPT` (the
-   block that starts around line 400). Add a paragraph describing
-   the four-state outcome vocabulary (`active` / `stale` /
-   `archived` / `split` / `deprecated`) with concrete decision
-   rules: "use `skill_manage action="split"` with `split_into=[…]`
-   when the skill is doing two unrelated jobs; use
-   `action="deprecate"` with `replaced_by="…"` when a better-named
-   umbrella covers the same domain."
-2. Add a short scoring-aware paragraph: "before splitting or
-   archiving, prefer to consult
-   `tools.skill_usage.get_record(name)` and
-   `agent.skill_scoring.compute_skill_score(name)` to confirm
-   the skill is actually underperforming — not just unused."
-3. Verify against `tests/test_lifecycle_states.py` and add a new
-   test that mocks the LLM prompt and asserts the new paragraphs
-   are present.
+1. `tools/skill_manager_tool.py:1531` — add `"split"` and
+   `"deprecate"` to the `SKILL_MANAGE_SCHEMA` action enum.
+2. Same file, lines 1532-1605 — declare `split_into: list` and
+   `replaced_by: string` in the schema parameters.
+3. Same file, lines 1612-1628 — extend the registry handler
+   lambda to forward both new arguments.
+4. `agent/curator_hooks.py:54` — extend `_MUTATING_ACTIONS` to
+   include `split` and `deprecate` so dry-run blocks them.
+5. `agent/curator.py` (the `## Structured summary (required)`
+   block) — add `splits:` and `deprecations:` lists to the YAML
+   schema and update `_parse_structured_summary` /
+   `_classify_removed_skills` / `_reconcile_classification` at
+   lines 751-1014 to surface them.
 
-After C, the natural next moves are **D** (CJK tokenizer +
-embedding layer) because that's the longest-running performance
-work and it unblocks future skill scaling.
+After C.deferred, the natural next move is **D** (CJK tokenizer
++ embedding layer) — longest-running performance work and the
+gating prerequisite for any future skill scaling.
 
 ---
 
 ## Branch state
 
-All work is on `main` of `feiguang50-hub/hermes-agent`. No
-uncommitted changes. The 13 commits listed above are the
-project's full footprint.
+All work is on `main` of `feiguang50-hub/hermes-agent`. Last
+status refresh: 2026-07-19. The 13 commits listed above remain
+the project footprint through 2026-07-18; the prompt edit,
+the two new prompt-string tests, and this PROJECT_STATUS.md
+update land as 3 follow-up commits in the same style (one
+focused commit per change, per the project's existing rhythm).
