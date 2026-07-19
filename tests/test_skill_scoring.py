@@ -369,3 +369,50 @@ class TestScoreBounds:
         )
         for comp in result["components"].values():
             assert 0.0 <= comp <= 1.0, f"component {comp} out of bounds"
+
+
+# ---------------------------------------------------------------------------
+# Chain validation (2a): once real outcome/feedback data exists, the score
+# discriminates good from bad and crosses the curator's 0.5 deprecate line.
+# ---------------------------------------------------------------------------
+
+def test_score_discriminates_good_bad_and_nodata(fake_hermes_home):
+    """With real data, a proven-bad skill scores well below 0.5 while a
+    proven-good one scores near 1.0. A no-data skill rides recency (can't be
+    distinguished from good) — negative evidence is what pulls a score down."""
+    for _ in range(20):
+        record_outcome("good", OUTCOME_SUCCESS, source=OUTCOME_SOURCE_AUTO)
+    for _ in range(5):
+        record_user_feedback("good", FEEDBACK_UP)
+
+    for _ in range(4):
+        record_outcome("bad", OUTCOME_SUCCESS, source=OUTCOME_SOURCE_AUTO)
+    for _ in range(16):
+        record_outcome("bad", OUTCOME_FAILURE, source=OUTCOME_SOURCE_AUTO)
+    for _ in range(6):
+        record_user_feedback("bad", FEEDBACK_DOWN)
+
+    # nodata: touch it so recency is fresh, but record no outcomes/feedback
+    skill_usage.begin_turn_skill_tracking()
+    skill_usage.bump_use("nodata")
+
+    good = skill_scoring.compute_skill_score("good")["score"]
+    bad = skill_scoring.compute_skill_score("bad")["score"]
+    nodata = skill_scoring.compute_skill_score("nodata")["score"]
+
+    assert good > 0.9, good
+    assert bad < 0.5, bad          # crosses the curator's deprecate threshold
+    assert good - bad > 0.5, (good, bad)
+    assert nodata > 0.5, nodata    # no negative evidence -> stays high (recency)
+
+
+def test_score_moves_as_failures_accumulate(fake_hermes_home):
+    """Sanity: recording failures via the real API actually drags the score
+    down — i.e. the sensor's writes flow through to the score."""
+    for _ in range(5):
+        record_outcome("s", OUTCOME_SUCCESS, source=OUTCOME_SOURCE_AUTO)
+    before = skill_scoring.compute_skill_score("s")["score"]
+    for _ in range(10):
+        record_outcome("s", OUTCOME_FAILURE, source=OUTCOME_SOURCE_AUTO)
+    after = skill_scoring.compute_skill_score("s")["score"]
+    assert after < before, (before, after)
