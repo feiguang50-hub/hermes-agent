@@ -601,15 +601,27 @@ CURATOR_REVIEW_PROMPT = (
     "prunings:\n"
     "  - name: <skill-name>\n"
     "    reason: <one short sentence — why archived with no merge target>\n"
+    "splits:\n"
+    "  - name: <old-skill-name>\n"
+    "    into: [<replacement-1>, <replacement-2>, ...]\n"
+    "    reason: <one short sentence — why decomposed, not just 'two topics'>\n"
+    "deprecations:\n"
+    "  - name: <old-skill-name>\n"
+    "    replaced_by: <umbrella-skill-name>\n"
+    "    reason: <one short sentence — why superseded>\n"
     "```\n\n"
     "Every skill you moved to .archive/ MUST appear in exactly one of the "
-    "two lists. If you consolidated X into umbrella Y (patched Y, wrote "
-    "a references file to Y, or created Y with X's content absorbed), X "
-    "goes under `consolidations` with `into: Y`. If you archived X with "
-    "no absorption — truly stale, irrelevant, or obsolete — X goes under "
-    "`prunings`. Leave a list empty (`consolidations: []`) if none. Do "
-    "not omit the block. The block comes AFTER your human-readable "
-    "summary of clusters processed, patches made, and decisions left alone."
+    "first two lists (consolidations / prunings). Skills whose state you "
+    "flipped via `skill_manage action=\"split\"` or `action=\"deprecate\"` "
+    "go in `splits` / `deprecations` respectively (one entry per actual "
+    "split/deprecate tool call). If you consolidated X into umbrella Y "
+    "(patched Y, wrote a references file to Y, or created Y with X's "
+    "content absorbed), X goes under `consolidations` with `into: Y`. If "
+    "you archived X with no absorption — truly stale, irrelevant, or "
+    "obsolete — X goes under `prunings`. Leave a list empty "
+    "(`consolidations: []`) if none. Do not omit the block. The block "
+    "comes AFTER your human-readable summary of clusters processed, "
+    "patches made, and decisions left alone."
 )
 
 
@@ -785,17 +797,23 @@ def _parse_structured_summary(
     """Extract the structured YAML block from the curator's final response.
 
     The curator prompt requires a fenced ```yaml block under
-    ``## Structured summary (required)`` with ``consolidations:`` and
-    ``prunings:`` lists. This parses it tolerantly:
+    ``## Structured summary (required)`` with ``consolidations:``,
+    ``prunings:``, ``splits:``, and ``deprecations:`` lists. This parses
+    it tolerantly:
 
     - Missing block → returns empty lists (we'll fall back to heuristic).
     - Malformed YAML → returns empty lists and we rely on heuristic.
     - Partial block (e.g. only consolidations) → returns what we could parse.
 
     Returns ``{"consolidations": [{"from", "into", "reason"}, ...],
-               "prunings":       [{"name", "reason"}, ...]}``.
+               "prunings":       [{"name", "reason"}, ...],
+               "splits":         [{"name", "into", "reason"}, ...],
+               "deprecations":   [{"name", "replaced_by", "reason"}, ...]}``.
     """
-    empty = {"consolidations": [], "prunings": []}
+    empty = {
+        "consolidations": [], "prunings": [],
+        "splits": [], "deprecations": [],
+    }
     if not llm_final or not isinstance(llm_final, str):
         return empty
 
@@ -824,9 +842,14 @@ def _parse_structured_summary(
     if not isinstance(data, dict):
         return empty
 
-    out: Dict[str, List[Dict[str, str]]] = {"consolidations": [], "prunings": []}
+    out: Dict[str, List[Dict[str, str]]] = {
+        "consolidations": [], "prunings": [],
+        "splits": [], "deprecations": [],
+    }
     cons_raw = data.get("consolidations") or []
     prun_raw = data.get("prunings") or []
+    splits_raw = data.get("splits") or []
+    deprecations_raw = data.get("deprecations") or []
 
     if isinstance(cons_raw, list):
         for entry in cons_raw:
@@ -854,6 +877,41 @@ def _parse_structured_summary(
             reason = entry.get("reason")
             out["prunings"].append({
                 "name": name.strip(),
+                "reason": (reason or "").strip() if isinstance(reason, str) else "",
+            })
+
+    if isinstance(splits_raw, list):
+        for entry in splits_raw:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            into = entry.get("into")
+            if not (isinstance(name, str) and name.strip()):
+                continue
+            if not isinstance(into, list) or not all(
+                isinstance(n, str) and n.strip() for n in into
+            ):
+                continue
+            reason = entry.get("reason")
+            out["splits"].append({
+                "name": name.strip(),
+                "into": [n.strip() for n in into],
+                "reason": (reason or "").strip() if isinstance(reason, str) else "",
+            })
+
+    if isinstance(deprecations_raw, list):
+        for entry in deprecations_raw:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            replaced_by = entry.get("replaced_by")
+            if not (isinstance(name, str) and name.strip()
+                    and isinstance(replaced_by, str) and replaced_by.strip()):
+                continue
+            reason = entry.get("reason")
+            out["deprecations"].append({
+                "name": name.strip(),
+                "replaced_by": replaced_by.strip(),
                 "reason": (reason or "").strip() if isinstance(reason, str) else "",
             })
 
@@ -912,6 +970,157 @@ def _extract_absorbed_into_declarations(
             continue
         out[name.strip()] = {"into": target.strip(), "declared": True}
     return out
+
+
+def _extract_lifecycle_declarations(
+    tool_calls: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
+    """Walk this run's tool calls and extract model-declared lifecycle flips.
+
+    Mirrors :func:`_extract_absorbed_into_declarations` for the new
+    ``split`` / ``deprecate`` actions added to the curator vocabulary in
+    B6. Each entry is the model's own declaration at the moment of the
+    call, which beats both post-hoc YAML summary parsing and any substring
+    heuristic. Used by the report writer to surface ``splits_this_run``
+    and ``deprecations_this_run`` in ``run.json`` / ``REPORT.md``.
+
+    Returns::
+
+        {
+            "splits":       [{name, into: [..], reason}, ...],
+            "deprecations": [{name, replaced_by, reason}, ...],
+        }
+
+    Skills for which the curator called ``skill_manage(action="split")``
+    but did not pass a ``split_into`` list are skipped — the tool itself
+    rejects that case so we shouldn't see it in practice, but be
+    defensive. Skills for which the curator called
+    ``skill_manage(action="deprecate")`` without ``replaced_by`` are
+    likewise skipped.
+    """
+    out: Dict[str, Dict[str, List[Dict[str, Any]]]] = {
+        "splits": [],
+        "deprecations": [],
+    }
+    for tc in tool_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        if tc.get("name") != "skill_manage":
+            continue
+        raw = tc.get("arguments") or ""
+        args: Dict[str, Any] = {}
+        if isinstance(raw, dict):
+            args = raw
+        elif isinstance(raw, str):
+            try:
+                args = json.loads(raw)
+            except Exception:
+                continue
+        if not isinstance(args, dict):
+            continue
+        action = args.get("action")
+        name = args.get("name")
+        if not (isinstance(name, str) and name.strip()):
+            continue
+        name = name.strip()
+        if action == "split":
+            split_into = args.get("split_into")
+            if not isinstance(split_into, list) or not all(
+                isinstance(n, str) and n.strip() for n in split_into
+            ):
+                continue
+            out["splits"].append({
+                "name": name,
+                "into": [n.strip() for n in split_into],
+                "reason": "",
+            })
+        elif action == "deprecate":
+            replaced_by = args.get("replaced_by")
+            if not isinstance(replaced_by, str) or not replaced_by.strip():
+                continue
+            out["deprecations"].append({
+                "name": name,
+                "replaced_by": replaced_by.strip(),
+                "reason": "",
+            })
+    return out
+
+
+def _reconcile_lifecycle(
+    lifecycle_decls: Dict[str, List[Dict[str, Any]]],
+    model_block: Dict[str, List[Dict[str, str]]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Merge tool-call lifecycle declarations with the model's YAML block.
+
+    Unlike consolidation/pruning — where the umbrella's existence in
+    ``destinations`` is an independent ground-truth signal — splits and
+    deprecations only mutate per-skill state, so there's no destinations
+    cross-check. Tool-call declarations win over YAML when both exist
+    (they're at the moment of the action, and the YAML is post-hoc),
+    but we graft the YAML's ``reason`` field onto the tool-call
+    declaration whenever the model-declared ``name`` matches. Skills
+    the model named in YAML but never called a tool for are still
+    surfaced (source="model only") so they show up in the audit log.
+
+    Returns ``{"splits": [...], "deprecations": [...]}`` with each
+    entry shaped ``{name, into|replaced_by, reason, source}``.
+    """
+    decl_splits = {e["name"]: e for e in lifecycle_decls.get("splits", [])}
+    decl_deps = {e["name"]: e for e in lifecycle_decls.get("deprecations", [])}
+    model_splits = {e["name"]: e for e in model_block.get("splits", [])}
+    model_deps = {e["name"]: e for e in model_block.get("deprecations", [])}
+
+    splits_out: List[Dict[str, Any]] = []
+    seen: set = set()
+    # Tool-call declarations first — they win, and we graft model reasons.
+    for name, decl in decl_splits.items():
+        seen.add(name)
+        reason = ""
+        model = model_splits.get(name)
+        if model and model.get("reason"):
+            reason = model["reason"]
+        splits_out.append({
+            "name": name,
+            "into": decl["into"],
+            "reason": reason,
+            "source": "model+audit" if model else "tool-call audit",
+        })
+    # Model-only entries the tool never called.
+    for name, model in model_splits.items():
+        if name in seen:
+            continue
+        splits_out.append({
+            "name": name,
+            "into": model["into"],
+            "reason": model.get("reason", ""),
+            "source": "model only",
+        })
+
+    deprecations_out: List[Dict[str, Any]] = []
+    seen = set()
+    for name, decl in decl_deps.items():
+        seen.add(name)
+        reason = ""
+        model = model_deps.get(name)
+        if model and model.get("reason"):
+            reason = model["reason"]
+        deprecations_out.append({
+            "name": name,
+            "replaced_by": decl["replaced_by"],
+            "reason": reason,
+            "source": "model+audit" if model else "tool-call audit",
+        })
+    for name, model in model_deps.items():
+        if name in seen:
+            continue
+        deprecations_out.append({
+            "name": name,
+            "replaced_by": model["replaced_by"],
+            "reason": model.get("reason", ""),
+            "source": "model only",
+        })
+
+    return {"splits": splits_out, "deprecations": deprecations_out}
 
 
 def _reconcile_classification(
@@ -1078,49 +1287,93 @@ def _build_rename_summary(
     after_names = set(after_by_name.keys())
     removed = sorted(before_names - after_names)
     added = sorted(after_names - before_names)
-    if not removed:
+
+    # Splits / deprecations — separate from consolidations/prunings
+    # because the underlying skill is NOT removed (file stays on disk,
+    # only routing state flips). Tool-call declarations beat the YAML
+    # block; we graft the model's reason onto each tool-call entry when
+    # the names line up. See `_reconcile_lifecycle`.
+    #
+    # Computed even when `removed` is empty so split-only / deprecate-only
+    # runs (no archive activity at all) still surface their lifecycle
+    # flips in the rename summary. The early-return below checks both.
+    model_block = _parse_structured_summary(model_final)
+    lifecycle_decls = _extract_lifecycle_declarations(tool_calls)
+    lifecycle = _reconcile_lifecycle(lifecycle_decls, model_block)
+    splits = lifecycle["splits"]
+    deprecations = lifecycle["deprecations"]
+
+    if not removed and not splits and not deprecations:
         return ""
 
-    heuristic = _classify_removed_skills(
-        removed=removed,
-        added=added,
-        after_names=after_names,
-        tool_calls=tool_calls,
-    )
-    model_block = _parse_structured_summary(model_final)
-    destinations = set(after_names) | set(added)
-    absorbed_declarations = _extract_absorbed_into_declarations(tool_calls)
-    classification = _reconcile_classification(
-        removed=removed,
-        heuristic=heuristic,
-        model_block=model_block,
-        destinations=destinations,
-        absorbed_declarations=absorbed_declarations,
-    )
-    consolidated = classification["consolidated"]
-    pruned = classification["pruned"]
+    if removed:
+        heuristic = _classify_removed_skills(
+            removed=removed,
+            added=added,
+            after_names=after_names,
+            tool_calls=tool_calls,
+        )
+        destinations = set(after_names) | set(added)
+        absorbed_declarations = _extract_absorbed_into_declarations(tool_calls)
+        classification = _reconcile_classification(
+            removed=removed,
+            heuristic=heuristic,
+            model_block=model_block,
+            destinations=destinations,
+            absorbed_declarations=absorbed_declarations,
+        )
+        consolidated = classification["consolidated"]
+        pruned = classification["pruned"]
+    else:
+        consolidated = []
+        pruned = []
 
     SHOW = 10
     lines: List[str] = []
     total = len(consolidated) + len(pruned)
-    lines.append(f"archived {total} skill(s):")
-    shown = 0
-    for entry in consolidated:
-        if shown >= SHOW:
-            break
-        name = entry.get("name", "?")
-        into = entry.get("into", "?")
-        lines.append(f"  • {name} → {into}")
-        shown += 1
-    for entry in pruned:
-        if shown >= SHOW:
-            break
-        name = entry.get("name", "?") if isinstance(entry, dict) else str(entry)
-        lines.append(f"  • {name} — pruned (stale)")
-        shown += 1
-    if total > SHOW:
-        lines.append(f"  … and {total - SHOW} more")
-    lines.append("full report: hermes curator status")
+    if total:
+        lines.append(f"archived {total} skill(s):")
+        shown = 0
+        for entry in consolidated:
+            if shown >= SHOW:
+                break
+            name = entry.get("name", "?")
+            into = entry.get("into", "?")
+            lines.append(f"  • {name} → {into}")
+            shown += 1
+        for entry in pruned:
+            if shown >= SHOW:
+                break
+            name = entry.get("name", "?") if isinstance(entry, dict) else str(entry)
+            lines.append(f"  • {name} — pruned (stale)")
+            shown += 1
+        if total > SHOW:
+            lines.append(f"  … and {total - SHOW} more")
+        lines.append("full report: hermes curator status")
+    # Splits / deprecations surface separately because the file is still on
+    # disk — these are routing-state flips, not deletions. Listed after
+    # the archive block (if any).
+    if splits or deprecations:
+        lines.append("")
+        lines.append(f"lifecycle flips: {len(splits) + len(deprecations)} skill(s):")
+        shown = 0
+        for entry in splits:
+            if shown >= SHOW:
+                break
+            name = entry.get("name", "?")
+            into = entry.get("into", []) or []
+            arrow = ", ".join(into) if isinstance(into, list) else str(into)
+            lines.append(f"  • {name} — split into [{arrow}]")
+            shown += 1
+        for entry in deprecations:
+            if shown >= SHOW:
+                break
+            name = entry.get("name", "?")
+            repl = entry.get("replaced_by", "?")
+            lines.append(f"  • {name} — deprecated, see {repl}")
+            shown += 1
+        if (len(splits) + len(deprecations)) > SHOW:
+            lines.append(f"  … and {len(splits) + len(deprecations) - SHOW} more")
     # Pin hint — only surface it when there's actually a destination skill
     # worth pinning. The umbrella skills that absorbed content are the natural
     # candidates: pinning one tells future curator runs to leave it alone.
@@ -1232,6 +1485,18 @@ def _write_run_report(
     consolidated = classification["consolidated"]
     pruned = classification["pruned"]
 
+    # Splits / deprecations — separate from consolidated/pruned because
+    # the underlying SKILL.md stays on disk (only the routing state flips).
+    # Tool-call declarations beat the YAML block; we graft the model's
+    # reason onto each tool-call entry when the names line up. See
+    # `_reconcile_lifecycle`.
+    lifecycle_decls = _extract_lifecycle_declarations(
+        llm_meta.get("tool_calls", []) or []
+    )
+    lifecycle = _reconcile_lifecycle(lifecycle_decls, model_block)
+    splits = lifecycle["splits"]
+    deprecations = lifecycle["deprecations"]
+
     # Rewrite cron job skill references. When the curator consolidates
     # skill X into umbrella Y, any cron job that lists X fails to load
     # it at run time — the scheduler skips it and the job runs without
@@ -1279,6 +1544,8 @@ def _write_run_report(
             "added_this_run": len(added),
             "consolidated_this_run": len(consolidated),
             "pruned_this_run": len(pruned),
+            "splits_this_run": len(splits),
+            "deprecations_this_run": len(deprecations),
             "state_transitions": len(transitions),
             "cron_jobs_rewritten": int(cron_rewrites.get("jobs_updated", 0)),
             "tool_calls_total": sum(tc_counts.values()),
@@ -1288,6 +1555,10 @@ def _write_run_report(
         "consolidated": consolidated,
         "pruned": pruned,
         "pruned_names": [p["name"] for p in pruned],
+        "splits": splits,
+        "deprecations": deprecations,
+        "split_names": [s["name"] for s in splits],
+        "deprecated_names": [d["name"] for d in deprecations],
         "added": added,
         "state_transitions": transitions,
         "cron_rewrites": cron_rewrites,
@@ -1365,6 +1636,8 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
                  f"(by name: {', '.join(f'{k}={v}' for k, v in sorted(tc_counts.items())) or 'none'})")
     lines.append(f"- consolidated into umbrellas: **{counts.get('consolidated_this_run', 0)}**")
     lines.append(f"- pruned (archived for staleness): **{counts.get('pruned_this_run', 0)}**")
+    lines.append(f"- split into replacements: **{counts.get('splits_this_run', 0)}**")
+    lines.append(f"- deprecated (superseded by umbrella): **{counts.get('deprecations_this_run', 0)}**")
     lines.append(f"- new skills this run: **{counts.get('added_this_run', 0)}**")
     lines.append(f"- state transitions (active ↔ stale ↔ archived): "
                  f"**{counts.get('state_transitions', 0)}**")
@@ -1435,6 +1708,69 @@ def _render_report_markdown(p: Dict[str, Any]) -> str:
                 lines.append(f"- `{entry}`")
         if len(pruned) > SHOW:
             lines.append(f"- … and {len(pruned) - SHOW} more (see `run.json`)")
+        lines.append("")
+
+    # Splits — skill decomposed into multiple replacements. The original
+    # SKILL.md stays on disk so the URL still resolves, but routing is
+    # flipped to point at the replacements. Different from "consolidated"
+    # because the source skill's content is intentionally NOT absorbed
+    # into a single umbrella — it's been carved up.
+    splits = p.get("splits") or []
+    if splits:
+        lines.append(f"### Split into replacement skills ({len(splits)})\n")
+        lines.append(
+            "_These skills were decomposed into multiple narrower skills "
+            "during this run. The original SKILL.md is kept on disk (the "
+            "URL still resolves) but routing now points at the replacements. "
+            "Each replacement was created via a separate `skill_manage "
+            "action=create` call._\n"
+        )
+        SHOW = 50
+        for entry in splits[:SHOW]:
+            name = entry.get("name", "?")
+            into = entry.get("into", []) or []
+            reason = (entry.get("reason") or "").strip()
+            source = entry.get("source", "")
+            into_str = ", ".join(f"`{n}`" for n in into)
+            line = f"- `{name}` → split into [{into_str}]"
+            if reason:
+                line += f" — {reason}"
+            if source == "model only":
+                line += "  _(named in summary, no `skill_manage action=split` call observed)_"
+            elif source == "tool-call audit":
+                line += "  _(detected via tool-call audit; missing from structured summary)_"
+            lines.append(line)
+        if len(splits) > SHOW:
+            lines.append(f"- … and {len(splits) - SHOW} more (see `run.json`)")
+        lines.append("")
+
+    # Deprecations — skill superseded by a single umbrella. Same on-disk
+    # behavior as split: file stays, routing flips to the replacement.
+    deprecations = p.get("deprecations") or []
+    if deprecations:
+        lines.append(f"### Deprecated — superseded by umbrella ({len(deprecations)})\n")
+        lines.append(
+            "_These skills were marked as superseded by a better-named "
+            "umbrella. The original SKILL.md is kept on disk (the URL still "
+            "resolves) but routing surfaces a pointer to the replacement. "
+            "Recorded via `skill_manage action=deprecate replaced_by=...`._\n"
+        )
+        SHOW = 50
+        for entry in deprecations[:SHOW]:
+            name = entry.get("name", "?")
+            repl = entry.get("replaced_by", "?")
+            reason = (entry.get("reason") or "").strip()
+            source = entry.get("source", "")
+            line = f"- `{name}` → superseded by `{repl}`"
+            if reason:
+                line += f" — {reason}"
+            if source == "model only":
+                line += "  _(named in summary, no `skill_manage action=deprecate` call observed)_"
+            elif source == "tool-call audit":
+                line += "  _(detected via tool-call audit; missing from structured summary)_"
+            lines.append(line)
+        if len(deprecations) > SHOW:
+            lines.append(f"- … and {len(deprecations) - SHOW} more (see `run.json`)")
         lines.append("")
 
     # Added list
