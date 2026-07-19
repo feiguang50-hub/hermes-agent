@@ -143,34 +143,42 @@ The prompt now tells the LLM to call `skill_manage
 action="split"` and `action="deprecate"`, but **the LLM cannot
 legally call them today**. Four specific gaps block the loop:
 
-* ⏳ **`SKILL_MANAGE_SCHEMA` enum** at
-  `tools/skill_manager_tool.py:1531` lists only
-  `["create", "patch", "edit", "delete", "write_file",
-  "remove_file"]`. Adding `"split"` and `"deprecate"` to this
-  enum is the prerequisite for the LLM to even propose the call.
-* ⏳ **`SKILL_MANAGE_SCHEMA` parameters** dict at
-  `tools/skill_manager_tool.py:1532-1605` does not declare
-  `split_into: list` or `replaced_by: string`. Even with the
-  enum fix, the schema validator would silently drop or reject
-  these arguments.
-* ⏳ **Registry handler forwarding** at
-  `tools/skill_manager_tool.py:1612-1628` only forwards
-  `absorbed_into`; `split_into` and `replaced_by` would need to
-  be added to the lambda's argument extraction so the dispatcher
-  actually receives them.
-* ⏳ **`_MUTATING_ACTIONS` blocklist** at
-  `agent/curator_hooks.py:54` is the set
-  `{"patch", "create", "write_file", "delete"}`. Until `split`
-  and `deprecate` are added, the curator's dry-run guard and
-  keyword-retention check won't see these new actions.
-* ⏳ **Structured YAML output schema** at
+* ✅ **`SKILL_MANAGE_SCHEMA` enum** at
+  `tools/skill_manager_tool.py:1531` — added `"split"` and
+  `"deprecate"` to the enum. Pinned by
+  `tests/agent/test_curator_classification.py::test_skill_manage_schema_includes_split_and_deprecate`.
+* ✅ **`SKILL_MANAGE_SCHEMA` parameters** dict at
+  `tools/skill_manager_tool.py:1532-1605` — declared
+  `split_into: array` and `replaced_by: string` with the same
+  descriptions the prompt uses, so the model knows the exact
+  shapes. Pinned by
+  `tests/agent/test_curator_classification.py::test_skill_manage_schema_declares_split_into_and_replaced_by`.
+* ✅ **Registry handler forwarding** at
+  `tools/skill_manager_tool.py:1612-1628` — extended the
+  lambda to forward `split_into=args.get("split_into")` and
+  `replaced_by=args.get("replaced_by")` to the underlying
+  `skill_manage()` call (which already accepts both).
+* ✅ **`_MUTATING_ACTIONS` blocklist** at
+  `agent/curator_hooks.py:54` — extended to include `split`
+  and `deprecate`. The dry-run guard and keyword-retention
+  check now see the new actions, so a curator can't route
+  around them by flipping state without touching files. Pinned
+  by
+  `tests/agent/test_curator_classification.py::test_mutating_actions_includes_split_and_deprecate`.
+* ✅ **Structured YAML output schema** at
   `agent/curator.py` (the `## Structured summary (required)`
-  block) declares only `consolidations:` and `prunings:` lists.
-  Adding `splits:` and `deprecations:` lists (and updating
-  `_parse_structured_summary` / `_classify_removed_skills` /
-  `_reconcile_classification` at lines 751-1014) is needed for
-  downstream tooling to see the new categories distinctly from
-  the existing two.
+  block) — added `splits:` and `deprecations:` lists and
+  updated `_parse_structured_summary` to surface them. Added
+  two new helpers — `_extract_lifecycle_declarations` (parses
+  `skill_manage(action="split"|"deprecate")` tool calls, the
+  authoritative signal) and `_reconcile_lifecycle` (merges
+  tool calls with the YAML block, grafting the model's
+  `reason` onto each tool-call entry). `_build_rename_summary`
+  and `_write_run_report` now emit `splits_this_run` /
+  `deprecations_this_run` counts, payload keys, and a
+  dedicated markdown section. Pinned by 11 new tests in
+  `tests/agent/test_curator_classification.py` (parser,
+  extractor, reconciler, summary builder).
 
 **Dry-run log — 2026-07-19.** Verified the prompt-assembly
 side of C end-to-end by stubbing `_run_llm_review` to capture
@@ -304,6 +312,17 @@ After C.deferred, the natural next move is **D** (CJK tokenizer
 + embedding layer) — longest-running performance work and the
 gating prerequisite for any future skill scaling.
 
+**C.deferred status (2026-07-19, third pass): done.** All five
+plumbing items landed. The LLM can now legally emit
+`skill_manage(action="split", split_into=[...])` /
+`action="deprecate", replaced_by=...`, the curator's dry-run
+guard recognises them, and the YAML block / run.json / REPORT.md
+surface them as distinct categories from consolidations /
+prunings. A real `hermes curator run --dry-run` against a
+populated install will now exercise split/deprecate end-to-end,
+and the audit log (commit `8390566`) will show those verdicts
+— closing the loop.
+
 ---
 
 ## Branch state
@@ -321,6 +340,7 @@ commit per change):
 | `8390566` | feat(hermes-cli/curator): add audit subcommand to render curator_hooks audit log history |
 | `50c948b` | feat(hermes-cli): add hermes skill top-level command with score subcommand |
 | *this commit* | docs: update PROJECT_STATUS.md (F done; C.deferred as next task) |
+| *follow-ups* | C.deferred schema-plumbing: schema enum + parameters + handler forwarding; `_MUTATING_ACTIONS`; YAML splits:/deprecations: + parser + reconciler + report |
 
 The next session's work (C.deferred — schema plumbing) is
 listed in the "Recommended next-session entry point" section
